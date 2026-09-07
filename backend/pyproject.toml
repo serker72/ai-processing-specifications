@@ -1,0 +1,53 @@
+[project]
+name = "ai-processing-specifications"
+version = "0.1.0"
+description = "AI-система обработки спецификаций и генерации КП"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "pydantic-settings>=2.7",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "alembic>=1.14",
+    "pgvector>=0.3.6",
+    "psycopg[binary,pool]>=3.2",
+    "redis>=5.2",
+    "celery>=5.4",
+    "openpyxl>=3.1",
+    "weasyprint>=63",
+    "python-multipart>=0.0.20",
+    "pyjwt>=2.10",
+    "bcrypt>=4.2",
+    "email-validator>=2.2",
+    "dishka>=1.4",
+    "sentence-transformers>=3.3",
+    # CPU-only сборка torch (без CUDA-зависимостей ~5 ГБ)
+    "torch>=2.6",
+    # Единый слой LLM: облачные модели (OpenAI и др.) и локальные (Ollama)
+    "litellm>=1.60",
+    # Клиент для S3-совместимых хранилищ (MinIO)
+    "aioboto3>=13.1",
+    "aiobotocore>=2.19",
+]
+
+[tool.uv.sources]
+# PyTorch CPU-индекс: https://download.pytorch.org/whl/cpu
+torch = [
+    { index = "pytorch-cpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+    "pytest>=8.3",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
