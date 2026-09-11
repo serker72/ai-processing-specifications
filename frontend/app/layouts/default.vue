@@ -17,7 +17,7 @@
 
             <button
               type="button"
-              class="rounded bg-app-danger px-4 py-2 text-sm text-white transition-colors hover:bg-app-danger-strong"
+              class="rounded bg-app-danger px-4 py-2 text-sm text-app-on-accent transition-colors hover:bg-app-danger-strong"
               @click="handleLogout"
             >
               Выход

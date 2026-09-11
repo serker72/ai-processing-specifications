@@ -39,6 +39,7 @@
   --color-app-warning-bg: var(--app-warning-bg);
   --color-app-warning-fg: var(--app-warning-fg);
   --color-app-ring: var(--app-ring);
+  --color-app-on-accent: var(--app-on-accent);
   --color-app-sidebar: var(--app-sidebar);
   --color-app-sidebar-border: var(--app-sidebar-border);
   --color-app-sidebar-text: var(--app-sidebar-text);
@@ -63,12 +64,16 @@
   --app-accent-strong: #1d4ed8;
   --app-accent-bg: #dbeafe;
   --app-accent-fg: #1e40af;
-  --app-success: #16a34a;
-  --app-success-strong: #15803d;
+  /* Сплошные кнопки (accent/danger/success) читаются белым текстом; в тёмной
+     теме подложки светлые, поэтому текст там тёмный — см. --app-on-accent ниже.
+     success/danger подобраны под WCAG AA (>=4.5:1) с белым текстом. */
+  --app-on-accent: #ffffff;
+  --app-success: #15803d;
+  --app-success-strong: #166534;
   --app-success-bg: #dcfce7;
   --app-success-fg: #166534;
-  --app-danger: #dc2626;
-  --app-danger-strong: #b91c1c;
+  --app-danger: #b91c1c;
+  --app-danger-strong: #991b1b;
   --app-danger-bg: #fee2e2;
   --app-danger-fg: #991b1b;
   --app-info-bg: #dbeafe;
@@ -87,6 +92,7 @@
   --app-sidebar-muted: #94a3b8;
   --app-sidebar-hover: #1e293b;
   --app-sidebar-active: #1d4ed8;
+  --app-sidebar-active-text: #ffffff;
 }
 
 html.dark {
@@ -100,12 +106,16 @@ html.dark {
   --app-accent-strong: #3b82f6;
   --app-accent-bg: #1e3a8a;
   --app-accent-fg: #bfdbfe;
+  /* Подложки сплошных кнопок в тёмной теме светлые, поэтому текст на них тёмный.
+     -strong здесь светлее базы: в тёмном UI hover подсвечивает элемент, а не
+     затемняет его (в светлой теме — наоборот). */
+  --app-on-accent: #0b1220;
   --app-success: #22c55e;
-  --app-success-strong: #16a34a;
+  --app-success-strong: #4ade80;
   --app-success-bg: #14532d;
   --app-success-fg: #bbf7d0;
   --app-danger: #ef4444;
-  --app-danger-strong: #dc2626;
+  --app-danger-strong: #f87171;
   --app-danger-bg: #7f1d1d;
   --app-danger-fg: #fecaca;
   --app-info-bg: #1e3a8a;
@@ -238,7 +248,7 @@ form:not(.was-validated) .form-control.is-invalid ~ .invalid-feedback {
 .btn-submit,
 .btn-action {
   background: var(--app-accent);
-  color: #fff;
+  color: var(--app-on-accent);
 }
 
 .btn-upload:hover,
@@ -275,7 +285,7 @@ form:not(.was-validated) .form-control.is-invalid ~ .invalid-feedback {
 .btn-revoke,
 .btn-block {
   background: var(--app-danger);
-  color: #fff;
+  color: var(--app-on-accent);
 }
 
 .btn-delete:hover,
@@ -286,7 +296,7 @@ form:not(.was-validated) .form-control.is-invalid ~ .invalid-feedback {
 
 .btn-unblock {
   background: var(--app-success);
-  color: #fff;
+  color: var(--app-on-accent);
 }
 
 .btn-unblock:hover {

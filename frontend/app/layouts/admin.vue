@@ -80,10 +80,11 @@ async function handleLogout() {
 }
 
 /* Активный пункт — сплошная синяя подложка: в тёмной панели accent-текст
-   читается хуже, чем инвертированная плашка. */
+   читается хуже, чем инвертированная плашка. Текст — белый в обеих темах
+   (--app-sidebar-active-text), потому что и подложка, и панель не меняются. */
 .nav-item.router-link-active {
   background: var(--app-sidebar-active);
-  color: #fff;
+  color: var(--app-sidebar-active-text);
 }
 
 .logout {
