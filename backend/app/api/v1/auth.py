@@ -8,10 +8,16 @@ HttpOnly-куки.
 from dishka.integrations.fastapi import DishkaRoute, FromDishka
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
+from app.api.deps import get_current_user
 from app.core.config import Settings
 from app.core.messages import AuthMessages
+from app.models.models import User
+from app.repositories.session_repository import SessionRepository
+from app.repositories.user_repository import UserRepository
 from app.schemas.auth import LoginRequest, RefreshRequest
+from app.schemas.user import MeResponse
 from app.services.auth_service import AuthService
+from app.services.security import SecurityService
 
 router = APIRouter(route_class=DishkaRoute)
 
@@ -58,3 +64,16 @@ async def logout(
     access_token = _get_cookie(request, settings, "access_cookie_name")
     refresh_token = _get_cookie(request, settings, "refresh_cookie_name")
     await auth_service.logout(access_token, refresh_token, response)
+
+
+@router.get("/me", summary="Текущий пользователь: id, email, роль")
+async def me(
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+) -> MeResponse:
+    """Вернуть текущего пользователя по access-токену из куки (роль нужна фронтенду)."""
+    user: User = await get_current_user(request, settings, security_service, session_repository, user_repository)
+    return MeResponse.from_user(user)
