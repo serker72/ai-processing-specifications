@@ -1,0 +1,14 @@
+# Артефакты локальной сборки: в образе создаются свои (npm ci + nuxt build).
+# Без этого node_modules (239 МБ) и .output копируются в контекст и в слой образа.
+node_modules
+.nuxt
+.output
+dist
+
+# Локальное окружение и служебное
+.env
+.env.*
+!.env.example
+npm-debug.log*
+.DS_Store
+*.local

@@ -1,0 +1,14 @@
+# Зависимости и артефакты сборки Nuxt: восстанавливаются npm ci / npm run build,
+# в образ попадают только из npm ci (см. Dockerfile).
+node_modules/
+.nuxt/
+.output/
+dist/
+
+# Локальное окружение и служебное
+.env
+.env.*
+!.env.example
+*.local
+npm-debug.log*
+.DS_Store

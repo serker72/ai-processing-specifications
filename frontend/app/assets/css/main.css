@@ -1,0 +1,490 @@
+/* Глобальные стили приложения: Tailwind v4, токены темы, общие компоненты.
+   Порядок важен: @import подключает preflight и утилиты, наши правила идут после. */
+
+@import "tailwindcss";
+
+/* Тёмная тема управляется классом .dark на <html> (useTheme + inline-скрипт в
+   nuxt.config), а не только системной настройкой — переопределяем вариант dark:. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ── Токены темы как Tailwind-токены ────────────────────────────────────────
+   `inline` обязателен: в обычной форме Tailwind объявляет дублирующий
+   --color-app-* в :root, а правила подставляют var(--color-app-*) → var(--app-*)
+   — одна и та же палитра объявлена дважды. С inline Tailwind подставляет в
+   утилиты значение из @theme, то есть var(--app-*), и единственным источником
+   цветов остаются :root / html.dark ниже.
+   Объявлены только цвета: шрифты, размеры, радиусы и тени остаются в
+   стандартной палитре Tailwind. */
+@theme inline {
+  --color-app-bg: var(--app-bg);
+  --color-app-surface: var(--app-surface);
+  --color-app-surface-muted: var(--app-surface-muted);
+  --color-app-border: var(--app-border);
+  --color-app-text: var(--app-text);
+  --color-app-muted: var(--app-muted);
+  --color-app-accent: var(--app-accent);
+  --color-app-accent-strong: var(--app-accent-strong);
+  --color-app-accent-bg: var(--app-accent-bg);
+  --color-app-accent-fg: var(--app-accent-fg);
+  --color-app-success: var(--app-success);
+  --color-app-success-strong: var(--app-success-strong);
+  --color-app-success-bg: var(--app-success-bg);
+  --color-app-success-fg: var(--app-success-fg);
+  --color-app-danger: var(--app-danger);
+  --color-app-danger-strong: var(--app-danger-strong);
+  --color-app-danger-bg: var(--app-danger-bg);
+  --color-app-danger-fg: var(--app-danger-fg);
+  --color-app-info-bg: var(--app-info-bg);
+  --color-app-info-fg: var(--app-info-fg);
+  --color-app-warning-bg: var(--app-warning-bg);
+  --color-app-warning-fg: var(--app-warning-fg);
+  --color-app-ring: var(--app-ring);
+  --color-app-sidebar: var(--app-sidebar);
+  --color-app-sidebar-border: var(--app-sidebar-border);
+  --color-app-sidebar-text: var(--app-sidebar-text);
+  --color-app-sidebar-muted: var(--app-sidebar-muted);
+  --color-app-sidebar-hover: var(--app-sidebar-hover);
+  --color-app-sidebar-active: var(--app-sidebar-active);
+}
+
+/* ── Токены темы ────────────────────────────────────────────────────────────
+   Единственный источник цветов: компоненты и утилиты ссылаются только на них,
+   поэтому переключение темы = замена значений на html.dark.
+   Суффиксы: без суффикса — основной цвет действия, -strong — hover,
+   -bg / -fg — фон и текст «мягких» плашек (бейджи, предупреждения). */
+:root {
+  --app-bg: #f5f6f8;
+  --app-surface: #ffffff;
+  --app-surface-muted: #f1f5f9;
+  --app-border: #e2e5ea;
+  --app-text: #1f2937;
+  --app-muted: #6b7280;
+  --app-accent: #2563eb;
+  --app-accent-strong: #1d4ed8;
+  --app-accent-bg: #dbeafe;
+  --app-accent-fg: #1e40af;
+  --app-success: #16a34a;
+  --app-success-strong: #15803d;
+  --app-success-bg: #dcfce7;
+  --app-success-fg: #166534;
+  --app-danger: #dc2626;
+  --app-danger-strong: #b91c1c;
+  --app-danger-bg: #fee2e2;
+  --app-danger-fg: #991b1b;
+  --app-info-bg: #dbeafe;
+  --app-info-fg: #1e40af;
+  --app-warning-bg: #fef3c7;
+  --app-warning-fg: #92400e;
+  --app-ring: #93c5fd;
+
+  /* Панель навигации. Специально не переопределяются в html.dark: сайдбар
+     тёмный в обеих темах — так он читается как постоянный «каркас» приложения
+     и не сливается с фоном страницы. -hover / -active — подложка пункта,
+     -active-text — его текст. */
+  --app-sidebar: #0f172a;
+  --app-sidebar-border: #1e293b;
+  --app-sidebar-text: #e2e8f0;
+  --app-sidebar-muted: #94a3b8;
+  --app-sidebar-hover: #1e293b;
+  --app-sidebar-active: #1d4ed8;
+}
+
+html.dark {
+  --app-bg: #0f172a;
+  --app-surface: #1e293b;
+  --app-surface-muted: #334155;
+  --app-border: #475569;
+  --app-text: #e2e8f0;
+  --app-muted: #94a3b8;
+  --app-accent: #60a5fa;
+  --app-accent-strong: #3b82f6;
+  --app-accent-bg: #1e3a8a;
+  --app-accent-fg: #bfdbfe;
+  --app-success: #22c55e;
+  --app-success-strong: #16a34a;
+  --app-success-bg: #14532d;
+  --app-success-fg: #bbf7d0;
+  --app-danger: #ef4444;
+  --app-danger-strong: #dc2626;
+  --app-danger-bg: #7f1d1d;
+  --app-danger-fg: #fecaca;
+  --app-info-bg: #1e3a8a;
+  --app-info-fg: #bfdbfe;
+  --app-warning-bg: #451a03;
+  --app-warning-fg: #fde68a;
+  --app-ring: #1d4ed8;
+}
+
+html,
+body {
+  background-color: var(--app-bg);
+  color: var(--app-text);
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Форму по умолчанию не валидируем до первого submit: сообщения появляются только после
+   попытки отправить форму или после blur уже тронутого поля. */
+form:not(.was-validated) .form-control.is-invalid ~ .invalid-feedback {
+  display: block;
+}
+
+.invalid-feedback:empty {
+  display: none !important;
+}
+
+/* ── Общие компоненты ─────────────────────────────────────────────────────── */
+
+.card {
+  background-color: var(--app-surface);
+  border: 1px solid var(--app-border);
+  border-radius: 0.5rem;
+  padding: 1.25rem;
+  margin-bottom: 1.25rem;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.05);
+}
+
+.card h1,
+.card h2,
+.card h3 {
+  margin-top: 0;
+}
+
+/* Каркас страницы: контент центрирован, заголовки и секции-карточки общие,
+   чтобы страницы не переопределяли цвета локальными стилями. */
+.page-container {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.page-container h1 {
+  font-size: 24px;
+  margin-bottom: 20px;
+}
+
+/* Узкая страница (рабочее место без широких таблиц). */
+.page-container-narrow {
+  max-width: 800px;
+}
+
+.upload-section h3,
+.upload-result h3,
+.result h3,
+.table-wrapper h3,
+.sse-log h3 {
+  margin-top: 0;
+  margin-bottom: 15px;
+  color: var(--app-muted);
+}
+
+/* Секция со списком (таблица) — та же карточка, что и формы загрузки. */
+.table-wrapper {
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+/* Лента событий обработки спецификации (SSE). */
+.sse-log {
+  background: var(--app-info-bg);
+  border: 1px solid color-mix(in srgb, var(--app-info-fg) 30%, transparent);
+  border-radius: 8px;
+  padding: 15px 20px;
+  margin-top: 20px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.sse-log h3 {
+  color: var(--app-info-fg);
+}
+
+.sse-log ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sse-log li {
+  padding: 5px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--app-info-fg) 25%, transparent);
+}
+
+.btn-upload,
+.btn-submit,
+.btn-edit,
+.btn-delete,
+.btn-revoke,
+.btn-action,
+.btn-block,
+.btn-unblock {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, opacity 0.15s ease;
+}
+
+.btn-upload,
+.btn-submit,
+.btn-action {
+  background: var(--app-accent);
+  color: #fff;
+}
+
+.btn-upload:hover,
+.btn-submit:hover:not(:disabled),
+.btn-action:hover {
+  filter: brightness(0.94);
+}
+
+.btn-upload:disabled,
+.btn-submit:disabled,
+.btn-action:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  filter: none;
+}
+
+/* Второстепенное действие: нейтральная кнопка без акцента. */
+.btn-edit,
+.btn-secondary {
+  background: var(--app-surface-muted);
+  color: var(--app-text);
+}
+
+.btn-edit:hover,
+.btn-secondary:hover {
+  filter: brightness(0.96);
+}
+
+.btn-edit:hover {
+  background: var(--app-border);
+}
+
+.btn-delete,
+.btn-revoke,
+.btn-block {
+  background: var(--app-danger);
+  color: #fff;
+}
+
+.btn-delete:hover,
+.btn-revoke:hover,
+.btn-block:hover {
+  background: var(--app-danger-strong);
+}
+
+.btn-unblock {
+  background: var(--app-success);
+  color: #fff;
+}
+
+.btn-unblock:hover {
+  background: var(--app-success-strong);
+}
+
+/* Кнопка-действие в таблице без подложки (иконки/эмодзи). */
+.btn-icon {
+  background: none;
+  border: none;
+  padding: 4px 6px;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.btn-icon.danger {
+  color: var(--app-danger);
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form-group label {
+  font-size: 13px;
+  color: var(--app-muted);
+}
+
+.form-group input,
+.form-group select {
+  padding: 8px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  font-size: 14px;
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.form-group input:focus,
+.form-group select:focus {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 1px;
+}
+
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.upload-section,
+.upload-result {
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.upload-form {
+  display: grid;
+  gap: 12px;
+}
+
+.upload-form-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.file-name {
+  color: var(--app-muted);
+  font-size: 13px;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.data-table th {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 2px solid var(--app-border);
+  color: var(--app-muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.data-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--app-border);
+  vertical-align: middle;
+}
+
+.data-table tr:hover {
+  background: color-mix(in srgb, var(--app-border) 40%, transparent);
+}
+
+.data-table select {
+  padding: 6px 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+/* Код/идентификаторы вне таблиц. */
+code {
+  background: var(--app-surface-muted);
+  color: var(--app-text);
+  border-radius: 3px;
+  padding: 2px 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+/* Текстовые акценты: ошибки форм и второстепенные пояснения. */
+.text-danger {
+  color: var(--app-danger);
+}
+
+.text-muted {
+  color: var(--app-muted);
+}
+
+/* Блок с результатом запроса (JSON ответ загрузки). */
+.result {
+  background: var(--app-surface-muted);
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 15px;
+  margin-top: 20px;
+  overflow-x: auto;
+}
+
+.result pre {
+  margin: 0;
+  font-size: 12px;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.status-badge.active,
+.status-badge.completed,
+.status-badge.current {
+  background: var(--app-success-bg);
+  color: var(--app-success-fg);
+}
+
+.status-badge.blocked,
+.status-badge.failed {
+  background: var(--app-danger-bg);
+  color: var(--app-danger-fg);
+}
+
+/* processing — «в работе» (информационный), upcoming — ожидающийся шаблон КП. */
+.status-badge.processing,
+.status-badge.upcoming {
+  background: var(--app-info-bg);
+  color: var(--app-info-fg);
+}
+
+/* pending — загружено и ждёт обработки (жёлтый, как в истории прайс-листов). */
+.status-badge.pending {
+  background: var(--app-warning-bg);
+  color: var(--app-warning-fg);
+}
+
+.empty-state {
+  text-align: center;
+  padding: 40px;
+  color: var(--app-muted);
+}
+
+.date-warning {
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--app-warning-bg);
+  border: 1px solid color-mix(in srgb, var(--app-warning-fg) 35%, transparent);
+  border-radius: 6px;
+  color: var(--app-warning-fg);
+  font-size: 13px;
+}
