@@ -52,12 +52,20 @@ class SpecificationRepository:
         upload_id: UUID,
         row_number: int,
         raw_data: dict,
+        matched_item_id: UUID | None = None,
+        match_type: str | None = None,
+        status: str | None = None,
     ) -> SpecificationRow:
         """Создать строку спецификации."""
+        from app.models.models import MatchType, RowStatus
+
         row = SpecificationRow(
             upload_id=upload_id,
             row_number=row_number,
             raw_data=raw_data,
+            matched_item_id=matched_item_id,
+            match_type=MatchType(match_type) if match_type else None,
+            status=status if status else RowStatus.pending,
         )
         self._session.add(row)
         await self._session.flush()

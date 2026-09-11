@@ -30,4 +30,4 @@ def init_embedding_model(**kwargs) -> None:
     print("Embedding model warmed up:", settings.embedding.model_name)
 
 # Импортируем таски для регистрации в Celery
-from app.worker.tasks import vectorize_catalog  # noqa: F401
+from app.worker.tasks import process_specification, vectorize_catalog  # noqa: F401

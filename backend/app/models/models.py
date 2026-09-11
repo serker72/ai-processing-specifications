@@ -140,7 +140,9 @@ class RowStatus(str, enum.Enum):
     """Статус строки спецификации в рабочем процессе менеджера."""
 
     pending = "pending"
+    processing = "processing"  # обработка Matching Engine
     matched = "matched"
+    unmatched = "unmatched"  # не найдено в каталоге
     confirmed = "confirmed"  # подтверждено менеджером
     excluded = "excluded"  # исключено менеджером
 

@@ -121,3 +121,26 @@ class MinioService:
             return True
         except ClientError:
             return False
+
+    async def download_fileobj(self, key: str) -> Any:
+        """Скачать файл из хранилища в файл-объект.
+
+        Возвращает BytesIO с содержимым файла.
+        """
+        import io
+
+        client = await self._get_client()
+        encoded_key = quote(key, safe="/")
+        response = await client.get_object(Bucket=self._bucket, Key=encoded_key)
+        body = await response["Body"].read()
+        return io.BytesIO(body)
+
+    async def download_workbook(self, key: str) -> Any:
+        """Скачать Excel-файл из хранилища и открыть как openpyxl Workbook.
+
+        Возвращает openpyxl Workbook.
+        """
+        from openpyxl import load_workbook
+
+        fileobj = await self.download_fileobj(key)
+        return load_workbook(fileobj, read_only=True)

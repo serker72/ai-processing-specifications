@@ -5,10 +5,12 @@
 обработчика, а не через вложенные Depends.
 """
 
+import asyncio
 from typing import Annotated
 
 from dishka.integrations.fastapi import DishkaRoute, FromDishka
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
+from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_current_manager
 from app.core.config import Settings
@@ -20,6 +22,7 @@ from app.schemas.matching import MatchRequest, MatchResponse
 from app.services.matching_service import MatchingService
 from app.services.security import SecurityService
 from app.services.specification_service import FileTooLargeError, SpecificationService
+from app.worker.tasks import process_specification
 
 manager_router = APIRouter(route_class=DishkaRoute, prefix="/manager", tags=["manager"])
 
@@ -93,6 +96,61 @@ async def confirm_match(
     return ConfirmMatchResponse(**result)
 
 
+@manager_router.get(
+    "/specifications/{upload_id}/stream",
+    summary="SSE-поток обработки спецификации (Real-Time прогресс)",
+)
+async def stream_specification_progress(
+    upload_id: str,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+) -> StreamingResponse:
+    """SSE-эндпоинт для real-time отслеживания обработки спецификации.
+
+    Клиент подписывается на Redis Pub/Sub канал `spec_{upload_id}` и получает
+    события по мере обработки каждой строки Matching Engine.
+    """
+    await get_current_manager(request, settings, security_service, session_repository, user_repository)
+
+    from app.worker.redis_pubsub import RedisPubSub
+
+    channel = f"spec_{upload_id}"
+    redis_pubsub = RedisPubSub()
+
+    async def event_generator():
+        """Генератор SSE-событий из Redis Pub/Sub."""
+        pubsub = None
+        try:
+            pubsub = await redis_pubsub.subscribe(channel)
+            while True:
+                if await request.is_disconnected():
+                    break
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if message and message["type"] == "message":
+                    data = message["data"]
+                    yield f"data: {data}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if pubsub:
+                await pubsub.unsubscribe(channel)
+                await pubsub.close()
+            await redis_pubsub.close()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Отключить буферизацию nginx
+        },
+    )
+
+
 @manager_router.post(
     "/specifications",
     status_code=status.HTTP_201_CREATED,
@@ -123,6 +181,11 @@ async def upload_specification(
             original_filename=file.filename,
             manager_id=manager.id,
         )
+
+        # Запустить фоновую обработку строк через Matching Engine
+        upload_id = result["upload_id"]
+        process_specification.delay(upload_id, str(manager.id))
+
     except FileTooLargeError as e:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(e)) from e
     except HTTPException:
