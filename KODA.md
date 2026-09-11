@@ -7,15 +7,20 @@
 ```
 ai-processing-specifications/
 ├── backend/              # Python/FastAPI-бэкенд (основная часть, описана ниже)
+├── frontend/             # Nuxt 3 (Vue 3 + Tailwind v4, SSR) — см. «Frontend (frontend/)»
 ├── docs/
 │   └── design-plan.md    # Мастер-план системы: модули, задачи, требования
 ├── srv/                  # Конфигурации сервисов для docker-compose
 │   ├── nginx/            # nginx.conf + conf.d/default.conf (реверс-прокси)
-│   └── pgbouncer/        # pgbouncer.env (файл отсутствует — TODO)
+│   └── pgbouncer/        # pgbouncer.env
 ├── .koda/skills/         # Скиллы Koda
-├── docker-compose.yml    # Поднимает postgres (pgvector), pgbouncer, redis, minio, backend, worker, nginx
+├── docker-compose.yml    # postgres (pgvector), pgbouncer, redis, minio, backend, worker, frontend, nginx
+├── .env / .env.example   # Переменные окружения compose (example — шаблон)
+├── README.md             # Назначение системы и Tier-модель матчинга
 └── KODA.md               # Этот файл
 ```
+
+⚠️ `backend/` и `frontend/` — **соседние** каталоги, а не вложенные. Все пути указывать от корня репозитория (`frontend/app/...`, `backend/app/...`); относительные пути в файловых инструментах могут резолвиться от `backend/`, из-за чего файлы `frontend/` «не находятся», а новая запись создаёт лишний `backend/frontend/`.
 
 ## Документация (docs/)
 
@@ -49,7 +54,7 @@ ai-processing-specifications/
 
 ### pgbouncer (`srv/pgbouncer/`)
 
-Директория пуста — `docker-compose.yml` ожидает файл `srv/pgbouncer/pgbouncer.env` (без него сервис pgbouncer не запустится). TODO: создать файл с параметрами подключения.
+`pgbouncer.env` — параметры пула; `docker-compose.yml` подключает его через `env_file`, поэтому без файла сервис pgbouncer не запустится. Остальные параметры (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `LISTEN_ADDR`, `LISTEN_PORT`, `AUTH_TYPE`) задаются в самом `docker-compose.yml`.
 
 ## Скиллы Koda (.koda/skills/)
 
@@ -92,8 +97,9 @@ ai-processing-specifications/
 | AI — эмбеддинги | `sentence-transformers` + `intfloat/multilingual-e5-base` локально на CPU (768-dim), Singleton `EmbeddingService` |
 | AI — LLM | `litellm` (единый слой): облачный `openai/gpt-4o-mini` или локальная Ollama `ollama/qwen2.5:7b` — переключение через `LLM_PROVIDER` |
 | Конфигурация | pydantic-settings, `.env` |
-| Инструменты | uv (менеджер зависимостей), ruff (линтер), pytest (тесты) |
-| Развёртывание | Docker + docker-compose (nginx как реверс-прокси) |
+| Frontend | Nuxt 3 (Vue 3, SSR, `srcDir: app/`) + Tailwind CSS v4, Pinia нет — состояние в композаблах |
+| Инструменты | uv (менеджер зависимостей), ruff (линтер), pytest (тесты), npm/NVM (фронтенд) |
+| Развёртывание | Docker + docker-compose (nginx как реверс-прокси, отдельный образ фронтенда) |
 
 ## Структура каталога backend
 
@@ -101,7 +107,7 @@ ai-processing-specifications/
 backend/
 ├── app/
 │   ├── main.py            # Точка входа FastAPI (эндпоинт /health, подключение api_router и DI)
-│   ├── worker.py          # Celery-приложение (брокер/бэкенд — Redis)
+│   ├── worker/            # Celery-пакет: `celery_app` в __init__.py, таски в tasks.py, Redis Pub/Sub
 │   ├── api/
 │   │   └── v1/            # Роутеры FastAPI (route_class=DishkaRoute), только приём/ответ
 │   ├── core/
@@ -117,7 +123,8 @@ backend/
 │   └── services/          # Классы бизнес-логики (services layer)
 ├── alembic/
 │   ├── env.py             # Async-миграции; DSN берётся из Settings, не из alembic.ini
-│   └── script.py.mako
+│   ├── script.py.mako
+│   └── versions/          # Файлы миграций: {YYYYMMDD}_{HHMMSS}-{rev}_{slug}.py
 ├── alembic.ini
 ├── pyproject.toml         # Зависимости проекта (uv)
 ├── uv.lock
@@ -150,42 +157,81 @@ backend/
 * `OMP/MKL/OPENBLAS/NUMEXPR_NUM_THREADS` — ограничение потоков математических вычислений (CPU-режим ML, по умолчанию 4; также заданы в Dockerfile).
 * `HF_DATA_DIR` — каталог кэша моделей Hugging Face на хосте; в контейнеры backend/worker монтируется как volume `hfdata` и задаётся `HF_HOME`.
 
+## Frontend (`frontend/`)
+
+Nuxt 3 (Vue 3, `<script setup>`) + Tailwind CSS v4 (`@tailwindcss/vite`). SSR включён, `srcDir: 'app/'`, конфигурация — `nuxt.config.ts`. **Pinia нет** — состояние в композаблах на `useState`.
+
+* `app/app.vue` — корень приложения: `<NuxtLayout><NuxtPage /></NuxtLayout>`. Обёртка `NuxtLayout` обязательна — в собственном `app.vue` без неё `definePageMeta({ layout })` игнорируется и страницы рендерятся без шапки/панели.
+* `app/assets/css/main.css` — `@import "tailwindcss"`, `@custom-variant dark`, палитра в токенах `--app-*` (`:root` / `html.dark`), блок `@theme inline` (обязателен `inline`: иначе Tailwind дублирует палитру в `--color-app-*`), общие классы компонентов.
+* `app/pages/` — маршруты (auto-routing): `index.vue` (редирект по роли, `layout: false`), `login.vue`, `dashboard.vue`, `admin/*` (users, devices, sessions, pricelists, catalog, proposal-templates), `manager/specifications.vue`.
+* `app/layouts/default.vue` — шапка (переключатель темы, email, выход), страницы в один столбец.
+* `app/layouts/admin.vue` — тёмная панель навигации + рабочая область; подключается каждой страницей `/admin/*` через `definePageMeta({ layout: 'admin' })`. Панель на отдельных токенах `--app-sidebar*`, которые намеренно не переопределены в `html.dark` (сайбар тёмный в обеих темах).
+* `app/components/common/ThemeToggle.vue` — переключатель светлой/тёмной темы.
+* `app/composables/` — `useAuth.ts` (сессия, роли, авто-refresh), `useTheme.ts` (класс `dark` + `localStorage`), `useFingerprint.ts` (thumbmarkjs).
+* `app/plugins/` — `api.ts` ($fetch с cookie и интерцептором 401 → refresh → повтор), `theme.client.ts`, `thumbmark.client.ts`.
+* `app/middleware/auth-guard.global.ts` — global middleware: сессия (`ensureAuth`), редирект гостя на `/login`, доступ к `/admin/**` (admin) и `/manager/**` (manager). Суффикс `.global` обязателен — без него Nuxt не подключает middleware к переходам.
+* `Dockerfile` — `node:24-alpine`: `npm ci --legacy-peer-deps` (по `package-lock.json`) → `npm run build` → `node .output/server/index.mjs`, порт 3000. Версия Node в образе и локально (`.nvmrc`) должна совпадать.
+* `.dockerignore` / `.gitignore` — `node_modules`, `.nuxt`, `.output` исключены из контекста сборки и из репозитория (без `.dockerignore` в образ попадали две копии зависимостей — 831 МБ вместо 449 МБ).
+* `.nuxt/`, `.output/`, `node_modules/` — артефакты сборки: не редактировать и не коммитить.
+
+Цвета брать только из токенов темы: в разметке — утилиты Tailwind (`bg-app-surface`, `text-app-muted`, …), в CSS-правилах — `var(--app-*)`; хардкод hex и палитры `neutral-*`/`white` не добавлять.
+
 ## Сборка и запуск
 
-Пакетный менеджер — **uv**. Репозиторий — часть монорепозитория: корневой `docker-compose.yml` (на уровень выше) поднимает postgres (pgvector), pgbouncer, redis, minio, backend, celery-worker и nginx.
+**Сборка и запуск — через docker-compose из корня репозитория** (`docker-compose.yml`, рядом нужен `.env`, шаблон `.env.example`). Локальные `uv run …` и `npm run …` — для линтинга, миграций и точной отладки.
 
 ```bash
-# Установка зависимостей (создаст venv)
-uv sync
+# Из корня репозитория
+docker compose build backend frontend   # образ backend используют сервисы backend и worker
+docker compose up -d                    # postgres, pgbouncer, redis, minio, backend, worker, frontend, nginx
+docker compose ps                       # статус сервисов и healthcheck
+docker compose logs -f backend worker frontend
+docker compose restart backend
+docker compose down                     # без -v: тома postgres/minio — bind на каталоги хоста
+```
 
-# Запуск API локально
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+* `backend` и `worker` монтируют `./backend/app:/app/app`, поэтому правки Python подхватываются `docker compose restart backend` без пересборки; `pyproject.toml`, `uv.lock` и `alembic/` копируются в образ — они требуют `docker compose build backend`.
+* `frontend` собирается внутри образа (`npm run build`), bind-mount'а нет: после любых правок фронтенда — `docker compose build frontend`.
+* Порты: nginx `:80` (`/api/` → backend, `/health` → backend, `/` → frontend), frontend `:3000`, pgbouncer `:5432`.
+* `BACKEND_CONTAINER_COMMAND` в `.env` — аргументы uvicorn (`--workers N`; для разработки — `--reload`).
 
-# Запуск Celery-воркера
-uv run celery -A app.worker.celery_app worker --loglevel=info
+### Backend (`backend/`, uv)
 
-# Миграции Alembic (DSN из переменных окружения)
+Рабочий каталог — `backend/`.
+
+```bash
+uv sync                                                        # установка зависимостей (создаст .venv)
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000         # локальный запуск API
+uv run celery -A app.worker worker --loglevel=info             # Celery-приложение объявлено в app/worker/__init__.py
 uv run alembic upgrade head
-uv run alembic revision -m "описание"  # вручную, по правилам скилла alembic-create-revision
-
-# Линтинг
+uv run alembic revision -m "описание"                          # вручную, по правилам скилла alembic-create-revision
 uv run ruff check .
-
-# Тесты
-uv run pytest
+uv run pytest                                                  # каталог backend/tests/ ещё не создан
 ```
 
-Docker:
+### Frontend (`frontend/`)
+
+Node.js установлен через **NVM** и отсутствует в PATH неинтерактивной оболочки (`npm: not found`) — перед npm-командами добавлять bin NVM в PATH:
 
 ```bash
-# Из корня монорепозитория (там же нужен .env)
-docker compose build backend
-docker compose up -d
+export PATH="$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node" | tail -1)/bin:$PATH"
+node -v && npm -v
 ```
+
+Рабочий каталог — `frontend/`:
+
+```bash
+npm ci --legacy-peer-deps         # установка по package-lock.json — как в образе
+npm run dev                       # nuxt dev → http://localhost:3000
+npm run build                     # production-сборка в .output/
+npm run preview                   # nuxt preview
+```
+
+⚠️ Версия Node фиксируется в двух местах и должна совпадать: `.nvmrc` (локально) и `FROM node:24-alpine` (образ). `package-lock.json` коммитится — он обязателен для сборки образа (`npm ci`). `--legacy-peer-deps` нужен из-за конфликтующих peer-зависимостей в стеке Nuxt. Тестов, линтера и typecheck-скриптов в `package.json` нет: проверка фронтенда = успешная сборка.
 
 Примечания к Dockerfile:
 
-* Базовый образ `python:3.13-slim` + системные библиотеки pango/cairo/gdk-pixbuf (нужны WeasyPrint) и curl (healthcheck).
+* Базовый образ `python:3.13-slim` + системные библиотеки pango/cairo/gdk-pixbuf (нужны WeasyPrint) и curl (для проверок из контейнера; `healthcheck` в compose объявлен у postgres, redis и minio, у backend — нет).
 * Зависимости ставятся через `uv sync --frozen --no-dev --no-install-project`; venv размещается в `/opt/venv`, чтобы bind-mount исходников (`./backend/app:/app/app`) его не затирал.
 
 ### Проверка работоспособности
