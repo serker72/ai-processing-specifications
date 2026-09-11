@@ -198,3 +198,28 @@ class HistoricalMatch(Base):
     )
 
     catalog_item: Mapped[CatalogItem] = relationship()
+
+
+class ProposalTemplate(Base):
+    """Шаблон коммерческого предложения (HTML/Jinja2)."""
+
+    __tablename__ = "proposal_templates"
+    __table_args__ = (
+        Index("uq_proposal_templates_start_date", "start_date", unique=True),
+        {"comment": "Шаблоны коммерческих предложений"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, comment="Идентификатор шаблона"
+    )
+    name: Mapped[str] = mapped_column(String(255), comment="Название шаблона")
+    html_key: Mapped[str] = mapped_column(Text, comment="Ключ файла шаблона в MinIO (HTML/Jinja2)")
+    start_date: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), comment="Дата начала действия шаблона"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), comment="Время создания записи"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), comment="Время последнего обновления"
+    )

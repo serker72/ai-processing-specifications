@@ -13,6 +13,7 @@ from app.core.config import Settings, get_settings
 from app.db.session import async_session_factory
 from app.repositories.matching_repository import MatchingRepository
 from app.repositories.price_list_repository import PriceListRepository
+from app.repositories.proposal_template_repository import ProposalTemplateRepository
 from app.repositories.session_repository import SessionRepository
 from app.repositories.specification_repository import SpecificationRepository
 from app.repositories.user_repository import UserRepository
@@ -23,6 +24,7 @@ from app.services.llm_service import LlmService
 from app.services.matching_service import MatchingService
 from app.services.minio_service import MinioService
 from app.services.price_list_service import PriceListService
+from app.services.proposal_template_service import ProposalTemplateService
 from app.services.security import SecurityService
 from app.services.specification_service import SpecificationService
 
@@ -81,6 +83,10 @@ class RepositoryProvider(Provider):
     @provide
     def provide_matching_repository(self, session: AsyncSession) -> MatchingRepository:
         return MatchingRepository(session)
+
+    @provide
+    def provide_proposal_template_repository(self, session: AsyncSession) -> ProposalTemplateRepository:
+        return ProposalTemplateRepository(session)
 
 
 class MinioProvider(Provider):
@@ -189,3 +195,11 @@ class ServiceProvider(Provider):
             llm_service,
             specification_repo,
         )
+
+    @provide
+    def provide_proposal_template_service(
+        self,
+        minio_service: MinioService,
+        proposal_template_repo: ProposalTemplateRepository,
+    ) -> ProposalTemplateService:
+        return ProposalTemplateService(proposal_template_repo, minio_service)
