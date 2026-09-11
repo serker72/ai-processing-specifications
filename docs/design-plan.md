@@ -126,8 +126,15 @@
 * Эндпоинт `POST /api/v1/manager/specifications` (Доступ: `manager`).
 * Загрузка Excel, чтение превью, вызов `gpt-4o-mini` для предсказания колонок (name, quantity и т.д.).
 * Сохранение конфигурации (маппинга).
+* **Реализация:**
+  * ✅ Эндпоинт `POST /api/v1/manager/specifications` (manager role).
+  * ✅ `SpecificationRepository` — CRUD для `SpecificationUpload` и `SpecificationRow`.
+  * ✅ `SpecificationService` — потоковая загрузка в MinIO, превью 50 строк, LLM-предсказание маппинга.
+  * ✅ `SpecificationMappingPrediction` — Pydantic-схема ответа LLM (name, quantity, unit, price, additional_columns).
+  * ✅ DI-провайдеры для `SpecificationRepository` и `SpecificationService`.
+  * ✅ Smoke-тест: загрузка Excel → MinIO + превью + LLM-маппинг → 201 Created.
 
-
+---
 
 ### Задача 5.2: Асинхронный процессинг и Real-Time (SSE)
 
@@ -135,6 +142,14 @@
 * Celery-воркер прогоняет все строки файла клиента через Matching Engine (Модуль 4).
 * Каждая обработанная строка пишется в `SpecificationRow` и публикуется в Redis Pub/Sub (`channel: spec_{id}`).
 * Эндпоинт `GET /api/v1/manager/specifications/{id}/stream` (FastAPI EventSourceResponse) для передачи событий на фронтенд по мере обработки.
+
+* **✅ Реализация:**
+  * ✅ Celery-таска `specification.process` (`app/worker/tasks.py`): читает Excel из MinIO по `column_mapping`, батчи по 100 строк, результат в `SpecificationRow`.
+  * ✅ `app/worker/redis_pubsub.py` — публикация в канал `spec_{upload_id}`; схемы событий `app/schemas/sse_events.py` (`RowMatchEvent`, `ProgressEvent`).
+  * ✅ `GET /api/v1/manager/specifications/{upload_id}/stream` — `StreamingResponse` (`text/event-stream`) с подпиской на Redis Pub/Sub, отписка по disconnect клиента.
+  * ✅ `POST /api/v1/manager/specifications` запускает таску (`process_specification.delay`) после сохранения upload.
+  * ✅ `RowStatus.processing` / `RowStatus.unmatched` — промежуточные состояния обработки.
+  * ⚠️ Вместо `sse_starlette.EventSourceResponse` — `StreamingResponse`: формат `data: …\n\n` отдаётся напрямую, лишняя зависимость не нужна.
 
 
 
@@ -158,10 +173,48 @@
 
 * **Требования к AI:**
 * Middleware защиты роутов (`/admin/*`, `/manager/*`).
-* **Admin UI:** Форма загрузки прайсов, интерфейс подтверждения колонок, таблица номенклатуры (каталог).
-* **Manager UI:** Рабочий стол спецификации. Таблица с виртуальным скроллом, подключенная к SSE.
-* Цветовое кодирование: зеленый (Точное совпадение), желтый (ТОП-5 на выбор), красный (Не найдено).
-* Действия пользователя (Выбрать из списка, Исключить, Подтвердить) записывают связи в базу `HistoricalMatch` для Tier-1.
+* **Admin UI:**
+  * **Управление пользователями:** Таблица пользователей с фильтрацией по роли, редактирование прав.
+  * **Управление устройствами:** Список зарегистрированных fingerprint-устройств, возможность блокировки.
+  * **Управление сессиями:** Активные сессии пользователей, функция принудительного выхода (отзыв сессии).
+  * Форма загрузки прайс-листов, интерфейс подтверждения колонок, таблица номенклатуры (каталог).
+* **Manager UI:**
+  * Рабочий стол спецификации. Таблица с виртуальным скроллом, подключенная к SSE.
+  * Цветовое кодирование: зеленый (Точное совпадение), желтый (ТОП-5 на выбор), красный (Не найдено).
+  * Действия пользователя (Выбрать из списка, Исключить, Подтвердить) записывают связи в базу `HistoricalMatch` для Tier-1.
+
+* **✅ Реализация:**
+* **Admin Layout** (`app/layouts/admin.vue`): Sidebar с навигацией по разделам + кнопка выхода.
+* **Users** (`app/pages/admin/users.vue`): Таблица пользователей с редактированием ролей.
+* **Devices** (`app/pages/admin/devices.vue`): Список fingerprint-устройств с блокировкой/разблокировкой.
+* **Sessions** (`app/pages/admin/sessions.vue`): Активные сессии с возможностью отзыва.
+* **Pricelists** (`app/pages/admin/pricelists.vue`): Загрузка прайс-листов + история загрузок.
+* **Catalog** (`app/pages/admin/catalog.vue`): Таблица номенклатуры с редактированием.
+* **Manager** (`app/pages/manager/specifications.vue`): Загрузка спецификаций + SSE-лог обработки.
+* **Middleware** (`app/middleware/auth-guard.global.ts`): глобальный, защищает роуты `/admin/*` и `/manager/*` по роли из `/auth/me`. Работает на клиенте (куки ставит backend на своём origin, SSR их не видит) — настоящий контроль ролей остаётся на backend (`require_role`).
+* **Smoke-тест:** сборка Nuxt — 2.14 MB (543 kB gzip), все роуты доступны.
+* **Осталось в рамках задачи:** виртуальный скролл таблицы спецификаций и действия менеджера (выбрать из ТОП-N / исключить / подтвердить) с записью в `HistoricalMatch` — эндпоинты на backend есть, в UI не подключены.
+
+
+### Задача 6.3: Добавить TailwindCSS и темы
+
+* **Требования к AI:**
+* Подключить TailwindCSS v4 в Nuxt 3 через `@tailwindcss/vite` (без `tailwind.config.js` — конфигурация на уровне CSS).
+* Единая точка стилей `app/assets/css/main.css`: `@import "tailwindcss"` + токены темы в CSS-переменных (`--app-bg`, `--app-surface`, `--app-border`, `--app-text`, `--app-muted`, `--app-accent`).
+* **Темы (light/dark):** переключение классом `.dark` на `<html>`, а не только системной настройкой — переопределить вариант через `@custom-variant dark (&:where(.dark, .dark *))`.
+* Выбор пользователя хранить в `localStorage` (ключ `app_theme`), по умолчанию — `prefers-color-scheme`.
+* Инлайновый блокирующий скрипт в `<head>` должен применять тему до гидратации (иначе FOUC между SSR и клиентом), плюс синхронизировать `style.colorScheme`.
+* Компонент переключателя темы (`ThemeToggle`) в шапке/сайдбаре; существующие страницы Admin/Manager перевести на токены темы (никаких хардкод-цветов в разметке).
+* **DoD:** Светлая и тёмная темы работают без мигания при перезагрузке, сборка Nuxt проходит успешно.
+
+* **✅ Реализация:**
+* **Зависимости** (`frontend/package.json`): `tailwindcss@^4.3`, `@tailwindcss/vite@^4.3`.
+* **Конфигурация** (`frontend/nuxt.config.ts`): плагин `tailwindcss()` в `vite.plugins`, `css: ['~/assets/css/main.css']`, блокирующий скрипт темы в `app.head.script` (`tagPosition: 'head'`).
+* **Стили** (`app/assets/css/main.css`): `@import "tailwindcss"`, `@custom-variant dark`, токены `:root` / `html.dark`, базовые классы компонентов (`card`, формы, таблицы, бейджи статусов).
+* **Composable** (`app/composables/useTheme.ts`): чтение/запись `app_theme`, резолв по `prefers-color-scheme`, `toggleTheme()`, реакция на смену системной темы.
+* **Компонент** (`app/components/common/ThemeToggle.vue`): кнопка переключения light/dark.
+* **Токены в утилитах Tailwind** (`@theme inline` в `main.css`): `--color-app-*: var(--app-*)` — классы `bg-app-surface`/`text-app-muted` читают ту же переменную, что и базовые стили, дублирования палитры нет.
+* **Контраст:** сплошные кнопки используют `--app-on-accent` (белый в светлой теме, тёмный в тёмной); пары фон/текст проверены по формуле WCAG — ≥ 4.5:1 в обеих темах.
 
 
 
@@ -171,12 +224,36 @@
 
 ## Модуль 7: Генератор Коммерческого Предложения
 
-### Задача 7.1: Сборка и экспорт документа
+### Задача 7.1: Загрузка шаблонов Коммерческого Предложения
+
+* **Требования к AI:**
+* Модель `ProposalTemplate` (БД): `name`, `html_key` (ключ файла в MinIO), `start_date` (DATE, обязательно).
+* Эндпоинты:
+  * `POST /api/v1/admin/proposal-templates` — загрузка HTML-шаблона в MinIO + создание записи.
+  * `GET /api/v1/admin/proposal-templates` — список шаблонов (сортировка по `start_date DESC`).
+  * `PATCH /api/v1/admin/proposal-templates/{id}` — обновление названия и даты.
+  * `DELETE /api/v1/admin/proposal-templates/{id}` — удаление шаблона и файла из MinIO.
+* Валидация при создании:
+  * `start_date` обязателен (нельзя создать без даты).
+  * `start_date > today` (дата начала должна быть в будущем).
+  * `start_date > max(start_date)` из существующих шаблонов (новая дата позже любой существующей).
+* Определение текущего шаблона: ближайший `start_date >= CURRENT_DATE`.
+* Frontend: страница `/admin/proposal-templates` с формой загрузки (HTML-файл, название, date picker) и таблицей шаблонов.
+
+* **✅ Реализация:**
+  * ✅ Модель `ProposalTemplate` (`app/models/models.py`) + миграция `proposal_templates`; уникальный индекс по `start_date` — иначе «текущий шаблон» неоднозначен.
+  * ✅ `ProposalTemplateRepository` (create/get_by_id/list_all/get_max_start_date/get_current_template/update/delete) и `ProposalTemplateService` с валидацией дат в UTC.
+  * ✅ `POST`/`GET` `/api/v1/admin/proposal-templates`, `PATCH`/`DELETE /api/v1/admin/proposal-templates/{id}` (multipart: `file`, `name`, `start_date`; проверка расширения `.html`).
+  * ✅ DI-провайдеры репозитория и сервиса; `MinioService.download_fileobj` для чтения HTML.
+  * ✅ Страница `/admin/proposal-templates`: форма загрузки, таблица, удаление, подсветка действующего шаблона.
+  * ⚠️ `PATCH` реализован на backend, в UI редактирование названия/даты не подключено.
+
+### Задача 7.2: Сборка и экспорт документа
 
 * **Требования к AI:**
 * Эндпоинт `GET /api/v1/manager/specifications/{id}/export?format=pdf|xlsx`.
 * Джоин подтвержденных `SpecificationRow` (количество) с `CatalogItem` (цена, артикул). Расчет сумм и НДС.
-* Генерация PDF (через `weasyprint` + HTML шаблон Jinja2) или XLSX (`openpyxl` с форматированием ячеек).
+* Генерация PDF (через `weasyprint` + HTML шаблон Jinja2), сохранение в MinIO, скачивание в браузере пользователя.
 
 
 * **DoD:** Менеджер получает оформленный файл коммерческого предложения по клику на кнопку в UI.
