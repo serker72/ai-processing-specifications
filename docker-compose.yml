@@ -28,6 +28,8 @@ services:
       LISTEN_ADDR: "*"
       LISTEN_PORT: "5432"
       AUTH_TYPE: scram-sha-256
+    ports:
+      - "5432:5432"
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,6 +115,18 @@ services:
       minio:
         condition: service_healthy
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NUXT_PUBLIC_API_BASE=${BACKEND_BASE_URL}${BACKEND_API_PREFIX}
+    depends_on:
+      - backend
+
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
@@ -123,6 +137,7 @@ services:
       - ./srv/nginx/conf.d:/etc/nginx/conf.d:ro
     depends_on:
       - backend
+      - frontend
 
 volumes:
   pgdata:
