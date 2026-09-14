@@ -109,7 +109,13 @@ backend/
 │   ├── main.py            # Точка входа FastAPI (эндпоинт /health, подключение api_router и DI)
 │   ├── worker/            # Celery-пакет: `celery_app` в __init__.py, таски в tasks.py, Redis Pub/Sub
 │   ├── api/
-│   │   └── v1/            # Роутеры FastAPI (route_class=DishkaRoute), только приём/ответ
+│   │   └── v1/            # Роутеры FastAPI (route_class=DishkaRoute), только приём/ответ:
+│   │                      #   auth.py — логин/refresh/logout/me;
+│   │                      #   admin.py — прайс-листы, каталог, шаблоны КП;
+│   │                      #   admin_access.py — пользователи, устройства, сессии (модуль 2);
+│   │                      #   manager.py — спецификации, матчинг, SSE;
+│   │                      #   deps.py — get_current_user/get_current_admin (вызываются из обработчиков,
+│   │                      #   потому что dishka разбирает только FromDishka в сигнатуре эндпоинта)
 │   ├── core/
 │   │   └── config.py      # pydantic-settings: группы настроек с env-префиксами
 │   ├── db/
@@ -138,6 +144,7 @@ backend/
 * `PriceListUpload` / `SpecificationUpload` — сессии загрузки файлов (статусы: `pending → mapping_predicted → processing → completed | failed`). `mapping_predicted` — LLM предсказал маппинг, ожидает подтверждения админом.
 * `SpecificationRow` — строка спецификации с результатом матчинга (`MatchType`, `RowStatus`: `pending / matched / confirmed / excluded`).
 * `HistoricalMatch` — словарь подтверждённых совпадений для Tier-1 (`raw_name_hash` — SHA-256, unique).
+* `Device` — реестр fingerprint-устройств (`fingerprint_hash` — SHA-256, unique; `blocked`, `first_seen_at`, `last_seen_at`). Запись создаётся при входе (`AuthService.login`), `blocked` запрещает вход с устройства; сами отпечатки на сервере не хранятся.
 
 ### Конфигурация (`app/core/config.py`)
 
@@ -163,11 +170,11 @@ Nuxt 3 (Vue 3, `<script setup>`) + Tailwind CSS v4 (`@tailwindcss/vite`). SSR в
 
 * `app/app.vue` — корень приложения: `<NuxtLayout><NuxtPage /></NuxtLayout>`. Обёртка `NuxtLayout` обязательна — в собственном `app.vue` без неё `definePageMeta({ layout })` игнорируется и страницы рендерятся без шапки/панели.
 * `app/assets/css/main.css` — `@import "tailwindcss"`, `@custom-variant dark`, палитра в токенах `--app-*` (`:root` / `html.dark`), блок `@theme inline` (обязателен `inline`: иначе Tailwind дублирует палитру в `--color-app-*`), общие классы компонентов.
-* `app/pages/` — маршруты (auto-routing): `index.vue` (редирект по роли, `layout: false`), `login.vue`, `dashboard.vue`, `admin/*` (users, devices, sessions, pricelists, catalog, proposal-templates), `manager/specifications.vue`.
-* `app/layouts/default.vue` — шапка (переключатель темы, email, выход), страницы в один столбец.
-* `app/layouts/admin.vue` — тёмная панель навигации + рабочая область; подключается каждой страницей `/admin/*` через `definePageMeta({ layout: 'admin' })`. Панель на отдельных токенах `--app-sidebar*`, которые намеренно не переопределены в `html.dark` (сайбар тёмный в обеих темах).
+* `app/pages/` — маршруты (auto-routing): `index.vue` (редирект по роли, `layout: false`), `login.vue`, `admin/*` (users, devices, sessions, pricelists, catalog, proposal-templates), `manager/specifications.vue` (загрузка + SSE), `manager/uploads.vue` (список ранее загруженных спецификаций).
+* `app/layouts/default.vue` — шапка (переключатель темы, email, выход), страницы в один столбец (вход).
+* `app/layouts/workspace.vue` — общий кабинет администратора и менеджера: тёмная панель навигации + рабочая область; подключается страницами `/admin/*` и `/manager/*` через `definePageMeta({ layout: 'workspace' })`. Различается только наполнение меню — пункты по роли берутся из `app/composables/useNavMenu.ts` (`ROLE_NAV`). Панель на отдельных токенах `--app-sidebar*`, которые намеренно не переопределены в `html.dark` (сайбар тёмный в обеих темах).
 * `app/components/common/ThemeToggle.vue` — переключатель светлой/тёмной темы.
-* `app/composables/` — `useAuth.ts` (сессия, роли, авто-refresh), `useTheme.ts` (класс `dark` + `localStorage`), `useFingerprint.ts` (thumbmarkjs).
+* `app/composables/` — `useAuth.ts` (сессия, роли, авто-refresh), `useNavMenu.ts` (пункты боковой панели по роли), `useTheme.ts` (класс `dark` + `localStorage`), `useFingerprint.ts` (thumbmarkjs).
 * `app/plugins/` — `api.ts` ($fetch с cookie и интерцептором 401 → refresh → повтор), `theme.client.ts`, `thumbmark.client.ts`.
 * `app/middleware/auth-guard.global.ts` — global middleware: сессия (`ensureAuth`), редирект гостя на `/login`, доступ к `/admin/**` (admin) и `/manager/**` (manager). Суффикс `.global` обязателен — без него Nuxt не подключает middleware к переходам.
 * `Dockerfile` — `node:24-alpine`: `npm ci --legacy-peer-deps` (по `package-lock.json`) → `npm run build` → `node .output/server/index.mjs`, порт 3000. Версия Node в образе и локально (`.nvmrc`) должна совпадать.

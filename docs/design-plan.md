@@ -165,6 +165,13 @@
 * `credentials: 'include'` (отправка кук).
 * Автоматический перехват HTTP 401 -> запрос на `/api/v1/auth/refresh` -> повтор оригинального запроса.
 
+* **✅ Реализация:**
+* `app/plugins/thumbmark.client.ts` — client-only плагин ThumbmarkJS: отпечаток генерируется один раз, кладётся в `useState` и `localStorage`, прогревается в фоне.
+* `app/plugins/api.ts` — `$api` (`$fetch.create`): `credentials: 'include'`, `retry: 0`, `Content-Type` не задаётся явно (иначе ломается multipart-загрузка).
+* Интерцептор `onResponseError`: на 401 (кроме auth-эндпоинтов) вызывает `/auth/refresh` «чистым» клиентом без интерцептора и повторяет исходный запрос. Рефреш один на волну 401 — параллельные запросы страницы ждут общий `Promise`, а не обновляют токен каждый сам. Если рефреш не помог, состояние пользователя очищается и выполняется переход на `/login?redirect=…`.
+* Все страницы ходят через `$api` (в `useState`-композаблах и на страницах); исключение — `EventSource` для SSE, где заголовок/клиент задать нельзя.
+* ⚠️ `useAuth().refresh()` остаётся явным (его вызывает `ensureAuth()` из guard'а); интерцептор обновляет токен своим запросом, чтобы не создавать рекурсию `$api → refresh → $api`.
+
 
 
 
@@ -184,16 +191,23 @@
   * Действия пользователя (Выбрать из списка, Исключить, Подтвердить) записывают связи в базу `HistoricalMatch` для Tier-1.
 
 * **✅ Реализация:**
-* **Admin Layout** (`app/layouts/admin.vue`): Sidebar с навигацией по разделам + кнопка выхода.
-* **Users** (`app/pages/admin/users.vue`): Таблица пользователей с редактированием ролей.
-* **Devices** (`app/pages/admin/devices.vue`): Список fingerprint-устройств с блокировкой/разблокировкой.
-* **Sessions** (`app/pages/admin/sessions.vue`): Активные сессии с возможностью отзыва.
-* **Pricelists** (`app/pages/admin/pricelists.vue`): Загрузка прайс-листов + история загрузок.
-* **Catalog** (`app/pages/admin/catalog.vue`): Таблица номенклатуры с редактированием.
+* **Общий Layout** (`app/layouts/workspace.vue`): единый Sidebar для администратора и менеджера + кнопка выхода; наполнение меню по роли — `app/composables/useNavMenu.ts`. Домашний маршрут роли (`useAuth.ROLE_HOME`) берётся из первого пункта `ROLE_NAV`, поэтому меню и редирект после входа не могут разойтись. Заглушка `pages/dashboard.vue` удалена.
+* **Backend админки** (`app/api/v1/admin_access.py` + `admin.py`, авторизация через `get_current_admin`):
+  * `GET /api/v1/admin/users`, `PATCH /api/v1/admin/users/{id}` — список и смена роли (`UserService`; сменить собственную роль нельзя — 400).
+  * `GET /api/v1/admin/devices`, `PATCH /api/v1/admin/devices/{fp_hash}` — реестр устройств и блокировка (`DeviceService`); блокировка дополнительно отзывает активные сессии отпечатка.
+  * `GET /api/v1/admin/sessions`, `DELETE /api/v1/admin/sessions/{user_id}/{fp_hash}` — сессии из Redis (`SCAN session:*`) и отзыв с занесением jti refresh-токена в blacklist (`SessionAdminService`).
+  * `GET /api/v1/admin/pricelists` — история загрузок прайс-листов; `GET /api/v1/admin/catalog?page&page_size&search` — позиции номенклатуры страницами с поиском.
+* **Модель `Device`** (`app/models/models.py`, миграция `c9cc1eb10b21`): `fingerprint_hash` (SHA-256, unique), `blocked`, `first_seen_at`, `last_seen_at`. Регистрация — upsert в `AuthService.login` (`DeviceRepository.touch`), вход с заблокированного устройства — 403 (`AuthMessages.DEVICE_BLOCKED`). Хранится только хэш отпечатка.
+* **Users** (`app/pages/admin/users.vue`): таблица пользователей из `/admin/users`, выбор роли → PATCH; своя строка заблокирована на клиенте так же, как на backend.
+* **Devices** (`app/pages/admin/devices.vue`): список устройств (хэш сокращён, полный — в `title`), блокировка/разблокировка PATCH-запросом.
+* **Sessions** (`app/pages/admin/sessions.vue`): активные сессии (email пользователя, отпечаток, срок истечения refresh-токена), отзыв DELETE-запросом.
+* **Pricelists** (`app/pages/admin/pricelists.vue`): загрузка Excel (multipart через `$api`) + история загрузок со статусами обработки.
+* **Catalog** (`app/pages/admin/catalog.vue`): таблица номенклатуры с поиском и пагинацией.
+* **Шаблоны КП** (`app/pages/admin/proposal-templates.vue`): загрузка, правка названия/даты (PATCH) и удаление; ошибки показываются на странице, а не `alert`/`console`.
 * **Manager** (`app/pages/manager/specifications.vue`): Загрузка спецификаций + SSE-лог обработки.
 * **Middleware** (`app/middleware/auth-guard.global.ts`): глобальный, защищает роуты `/admin/*` и `/manager/*` по роли из `/auth/me`. Работает на клиенте (куки ставит backend на своём origin, SSR их не видит) — настоящий контроль ролей остаётся на backend (`require_role`).
-* **Smoke-тест:** сборка Nuxt — 2.14 MB (543 kB gzip), все роуты доступны.
-* **Осталось в рамках задачи:** виртуальный скролл таблицы спецификаций и действия менеджера (выбрать из ТОП-N / исключить / подтвердить) с записью в `HistoricalMatch` — эндпоинты на backend есть, в UI не подключены.
+* **Smoke-тест:** сборка Nuxt — 2.16 MB (548 kB gzip), все роуты доступны; эндпоинты: admin — 200, manager на `/admin/*` — 403, гость — 401; блокировка устройства → вход с него 403, после разблокировки — 204; отзыв сессии уменьшает список и повторяет 404.
+* **Осталось в рамках задачи:** редактирование каталога (backend отдаёт только чтение), интерфейс подтверждения колонок прайс-листа, виртуальный скролл таблицы спецификаций и действия менеджера (выбрать из ТОП-N / исключить / подтвердить) с записью в `HistoricalMatch` — эндпоинты на backend есть, в UI не подключены.
 
 
 ### Задача 6.3: Добавить TailwindCSS и темы
