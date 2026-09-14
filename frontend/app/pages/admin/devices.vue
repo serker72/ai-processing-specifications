@@ -1,31 +1,41 @@
 <template>
   <div class="page-container">
-    <h1>Управление устройствами</h1>
-    
-    <div class="table-wrapper overflow-x-auto">
-      <table class="data-table">
+    <h1>Устройства (fingerprint)</h1>
+
+    <div class="mb-5">
+      <button class="btn-secondary" :disabled="isLoading" @click="loadDevices">
+        {{ isLoading ? 'Обновление...' : 'Обновить' }}
+      </button>
+    </div>
+
+    <div class="table-wrapper">
+      <table v-if="devices.length" class="data-table">
         <thead>
           <tr>
-            <th>Fingerprint</th>
-            <th>Последняя активность</th>
+            <th>Отпечаток устройства</th>
+            <th>Первый вход</th>
+            <th>Последний вход</th>
             <th>Статус</th>
             <th>Действия</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="device in devices" :key="device.fingerprint">
-            <td class="mono">{{ device.fingerprint }}</td>
-            <td>{{ new Date(device.last_active).toLocaleString() }}</td>
+          <tr v-for="device in devices" :key="device.fingerprint_hash">
+            <td class="mono" :title="device.fingerprint_hash">
+              {{ shortHash(device.fingerprint_hash) }}
+            </td>
+            <td>{{ formatDateTime(device.first_seen_at) }}</td>
+            <td>{{ formatDateTime(device.last_seen_at) }}</td>
             <td>
-              <span :class="['status-badge', device.blocked ? 'blocked' : 'active']">
-                {{ device.blocked ? 'Заблокировано' : 'Активно' }}
+              <span class="status-badge" :class="device.blocked ? 'blocked' : 'active'">
+                {{ device.blocked ? 'Заблокировано' : 'Разрешено' }}
               </span>
             </td>
             <td>
-              <button 
-                class="btn-action" 
+              <button
                 :class="device.blocked ? 'btn-unblock' : 'btn-block'"
-                @click="toggleBlockDevice(device)"
+                :disabled="busyHashes.includes(device.fingerprint_hash)"
+                @click="toggleBlock(device)"
               >
                 {{ device.blocked ? 'Разблокировать' : 'Заблокировать' }}
               </button>
@@ -33,26 +43,79 @@
           </tr>
         </tbody>
       </table>
+      <div v-else class="empty-state">
+        {{ isLoading ? 'Загрузка списка…' : 'Устройства ещё не регистрировались' }}
+      </div>
     </div>
 
-    <div v-if="!devices.length" class="empty-state">
-      Нет зарегистрированных устройств
-    </div>
+    <p v-if="error" class="text-danger">{{ error }}</p>
+    <p class="text-xs text-muted mt-4">
+      Блокировка запрещает вход с устройства и сразу отзывыает его активные сессии.
+    </p>
   </div>
 </template>
 
 <script setup lang="ts">
-definePageMeta({ layout: 'admin' })
+/**
+ * Реестр fingerprint-устройств и блокировка входа (GET/PATCH /admin/devices).
+ * Хранится только SHA-256 отпечатка — сами отпечатки на сервер не попадают.
+ */
+import { onMounted, ref } from 'vue'
 
-// Mock data for demonstration
-const devices = ref([
-  { fingerprint: '283628ad0c50441d9b93538c6ad99784fddbdce0fc2b96124c70cbf4b0789753', last_active: '2023-09-08T10:00:00Z', blocked: false },
-  { fingerprint: '57e19849a701070071cd3ee1231c5b5714cabaa9458ab16033a6e4f47bba932a', last_active: '2023-09-07T15:30:00Z', blocked: true },
-])
+definePageMeta({ layout: 'workspace' })
 
-async function toggleBlockDevice(device: any) {
-  // TODO: Implement API call to block/unblock device
-  device.blocked = !device.blocked
-  console.log('Toggle block for', device.fingerprint, 'to', device.blocked)
+/** Ответ backend: app/schemas/device.py (DeviceItem). */
+interface DeviceItem {
+  fingerprint_hash: string
+  blocked: boolean
+  first_seen_at: string
+  last_seen_at: string
 }
+
+const { $api } = useNuxtApp() as any
+
+const devices = ref<DeviceItem[]>([])
+const isLoading = ref(false)
+const error = ref('')
+const busyHashes = ref<string[]>([])
+
+function shortHash(hash: string) {
+  return `${hash.slice(0, 12)}…${hash.slice(-4)}`
+}
+
+function formatDateTime(value: string) {
+  return new Date(value).toLocaleString('ru-RU')
+}
+
+async function loadDevices() {
+  isLoading.value = true
+  error.value = ''
+  try {
+    const response = await $api('/admin/devices')
+    devices.value = response.devices
+  } catch (err: any) {
+    error.value = err?.data?.detail || 'Не удалось загрузить список устройств'
+  } finally {
+    isLoading.value = false
+  }
+}
+
+async function toggleBlock(device: DeviceItem) {
+  const blocked = !device.blocked
+  busyHashes.value = [...busyHashes.value, device.fingerprint_hash]
+  error.value = ''
+  try {
+    const updated = await $api(`/admin/devices/${device.fingerprint_hash}`, {
+      method: 'PATCH',
+      body: { blocked },
+    })
+    device.blocked = updated.blocked
+  } catch (err: any) {
+    error.value = err?.data?.detail || 'Не удалось изменить статус устройства'
+  } finally {
+    busyHashes.value = busyHashes.value.filter((hash) => hash !== device.fingerprint_hash)
+  }
+}
+
+onMounted(loadDevices)
 </script>

@@ -5,7 +5,10 @@
   <div class="min-h-screen bg-app-bg text-app-text">
     <nav class="border-b border-app-border bg-app-surface shadow-sm">
       <div class="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
-        <span class="text-xl font-bold">Auth System</span>
+        <span class="text-xl font-bold">
+          {{ BRAND_NAME }}
+          <span class="ml-2 hidden text-sm font-normal text-app-muted sm:inline">{{ brandSection }}</span>
+        </span>
 
         <div class="flex items-center gap-4">
           <CommonThemeToggle />
@@ -35,11 +38,14 @@
 
 <script setup lang="ts">
 /**
- * Layout со страницами в один столбец (вход, рабочее место менеджера): шапка с
- * переключателем темы, email пользователя и выходом. Для /admin/** есть
- * отдельный layout admin с панелью навигации. Авторизация и роли — на страницах
- * и в auth-guard, здесь только отображение уже загруженного пользователя.
+ * Layout страницы входа: шапка с названием продукта, переключателем темы, email
+ * пользователя и выходом. Кабинеты администратора и менеджера используют общий
+ * layout workspace с панелью навигации, поэтому сюда гость попадает только на
+ * /login (авторизованного auth-guard ведёт в его кабинет).
  */
+import { useAuth } from '~/composables/useAuth'
+import { BRAND_NAME } from '~/composables/useNavMenu'
+
 const { user, logout } = useAuth()
 
 async function handleLogout() {

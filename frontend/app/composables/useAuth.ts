@@ -14,6 +14,8 @@
 
 import { computed, ref } from 'vue'
 
+import { ROLE_NAV } from '~/composables/useNavMenu'
+
 export type UserRole = 'admin' | 'manager'
 
 /** Ответ GET /auth/me (backend/app/schemas/user.py). */
@@ -23,10 +25,14 @@ export interface AuthUser {
   role: UserRole
 }
 
-/** Домашняя страница роли: единственное место, куда ведут вход и корень сайта. */
+/**
+ * Домашняя страница роли: единственное место, куда ведут вход и корень сайта.
+ * Берётся из первого пункта меню раздела (useNavMenu.ROLE_NAV), чтобы после
+ * входа открывался раздел, который пользователь видит в панели активным.
+ */
 export const ROLE_HOME: Record<UserRole, string> = {
-  admin: '/admin/users',
-  manager: '/manager/specifications',
+  admin: ROLE_NAV.admin.items[0].to,
+  manager: ROLE_NAV.manager.items[0].to,
 }
 
 /**
@@ -73,8 +79,9 @@ export function useAuth() {
   }
 
   /**
-   * Выполняет рефреш access-токена.
-   * Вызывается интерцептором `$api` при 401 и явно из ensureAuth().
+   * Выполняет рефреш access-токена (явный вызов: ensureAuth после 401).
+   * В фоновом режиме 401 обрабатывает интерцептор plugins/api.ts — он обновляет
+   * токен своим запросом и повторяет исходный, не заходя в этот метод.
    */
   async function refresh() {
     // Backend требует fingerprint и в теле /auth/refresh (app/schemas/auth.py).

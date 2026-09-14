@@ -55,8 +55,8 @@ async function handleLogin() {
   const result = await login(email.value, password.value, fingerprint)
 
   if (result.success) {
-    // Перенаправляем на страницу спецификаций
-    navigateTo('/manager/specifications')
+    // Домашний маршрут роли (useAuth.ROLE_HOME): админ и менеджер видят свой раздел
+    navigateTo(result.home)
   }
 }
 </script>

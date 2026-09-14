@@ -1,35 +1,61 @@
 <template>
-  <div class="admin-layout">
+  <div class="workspace-layout">
     <aside class="sidebar">
-      <div class="logo">AI Specs Admin</div>
-      <nav>
-        <NuxtLink to="/admin/users" class="nav-item">Пользователи</NuxtLink>
-        <NuxtLink to="/admin/devices" class="nav-item">Устройства</NuxtLink>
-        <NuxtLink to="/admin/sessions" class="nav-item">Сессии</NuxtLink>
-        <NuxtLink to="/admin/pricelists" class="nav-item">Прайс-листы</NuxtLink>
-        <NuxtLink to="/admin/catalog" class="nav-item">Каталог</NuxtLink>
-        <NuxtLink to="/admin/proposal-templates" class="nav-item">Шаблоны КП</NuxtLink>
-      </nav>
-      <div class="logout">
-        <span class="user">{{ user?.email }}</span>
-        <CommonThemeToggle />
-        <button class="btn-delete w-full" @click="handleLogout">Выйти</button>
-      </div>
+      <!-- Панель зависит от роли и email из /auth/me, которые middleware поднимает
+             только на клиенте (SSR не видит куки backend): без ClientOnly серверный
+             HTML не совпадал бы с клиентским рендером (hydration mismatch).
+             В fallback — статичное название, чтобы панель не была пустой. -->
+      <ClientOnly>
+        <!-- Логотип ведёт на домашний маршрут роли (useAuth.ROLE_HOME), поэтому
+             клик по названию работает как «в начало раздела». -->
+        <NuxtLink :to="homePath" class="brand">
+          <span class="brand-name">{{ BRAND_NAME }}</span>
+          <span class="brand-section">{{ sectionTitle }}</span>
+        </NuxtLink>
+
+        <nav>
+          <NuxtLink
+            v-for="item in navItems"
+            :key="item.to"
+            :to="item.to"
+            class="nav-item"
+          >
+            {{ item.label }}
+          </NuxtLink>
+        </nav>
+
+        <div class="logout">
+          <span class="user">{{ user?.email }}</span>
+          <CommonThemeToggle />
+          <button class="btn-delete w-full" @click="handleLogout">Выйти</button>
+        </div>
+
+        <template #fallback>
+          <div class="brand">
+            <span class="brand-name">{{ BRAND_NAME }}</span>
+          </div>
+        </template>
+      </ClientOnly>
     </aside>
+
     <main class="content">
-      <NuxtPage />
+      <slot />
     </main>
   </div>
 </template>
 
 <script setup lang="ts">
 /**
- * Layout админки: постоянная тёмная панель навигации + рабочая область справа.
- * Подключается страницами /admin/** через definePageMeta({ layout: 'admin' }).
+ * Общий layout рабочего кабинета: тёмная панель навигации слева + рабочая область.
+ * Используется и администратором, и менеджером — наполнение меню берётся из
+ * useNavMenu() по роли пользователя, вёрстка и цвета едины.
+ * Подключается страницами definePageMeta({ layout: 'workspace' }).
  */
 import { useAuth } from '~/composables/useAuth'
+import { BRAND_NAME, useNavMenu } from '~/composables/useNavMenu'
 
-const { user, logout } = useAuth()
+const { user, homePath, logout } = useAuth()
+const { sectionTitle, navItems } = useNavMenu(() => user.value?.role ?? null)
 
 async function handleLogout() {
   await logout()
@@ -39,7 +65,7 @@ async function handleLogout() {
 </script>
 
 <style scoped>
-.admin-layout {
+.workspace-layout {
   display: flex;
   height: 100vh;
 }
@@ -57,11 +83,24 @@ async function handleLogout() {
   padding: 20px;
 }
 
-.logo {
+/* Шапка панели: название продукта + подпись раздела по роли. */
+.brand {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 30px;
+  text-decoration: none;
+  color: var(--app-sidebar-text);
+}
+
+.brand-name {
   font-size: 1.5rem;
   font-weight: bold;
-  margin-bottom: 30px;
-  color: var(--app-sidebar-text);
+}
+
+.brand-section {
+  font-size: 12px;
+  color: var(--app-sidebar-muted);
 }
 
 .nav-item {

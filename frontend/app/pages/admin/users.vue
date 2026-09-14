@@ -1,66 +1,118 @@
 <template>
   <div class="page-container">
     <h1>Управление пользователями</h1>
-    
+
+    <div class="mb-5">
+      <button class="btn-secondary" :disabled="isLoading" @click="loadUsers">
+        {{ isLoading ? 'Обновление...' : 'Обновить' }}
+      </button>
+    </div>
+
     <div class="table-wrapper">
-      <table class="data-table">
+      <table v-if="users.length" class="data-table">
         <thead>
           <tr>
-            <th>ID</th>
             <th>Email</th>
             <th>Роль</th>
             <th>Дата создания</th>
-            <th>Действия</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="user in users" :key="user.id">
-            <td>{{ user.id }}</td>
             <td>{{ user.email }}</td>
             <td>
-              <select v-model="user.role" @change="updateRole(user)">
+              <!-- Роль меняется сразу; при ошибке список перезагружаем,
+                   чтобы выбор отражал реальное состояние backend -->
+              <select
+                v-model="user.role"
+                :disabled="isBusy(user) || user.id === currentUserId"
+                @change="updateRole(user)"
+              >
                 <option value="admin">Admin</option>
                 <option value="manager">Manager</option>
               </select>
+              <span v-if="user.id === currentUserId" class="text-muted text-xs ml-2">это вы</span>
             </td>
-            <td>{{ new Date(user.created_at).toLocaleDateString() }}</td>
-            <td>
-              <button class="btn-edit" @click="editUser(user)">Изменить</button>
-              <button class="btn-delete" @click="deleteUser(user.id)">Удалить</button>
-            </td>
+            <td>{{ formatDate(user.created_at) }}</td>
           </tr>
         </tbody>
       </table>
+      <div v-else class="empty-state">
+        {{ isLoading ? 'Загрузка списка…' : 'Нет данных о пользователях' }}
+      </div>
     </div>
 
-    <div v-if="!users.length" class="empty-state">
-      Нет данных о пользователях
-    </div>
+    <p v-if="error" class="text-danger">{{ error }}</p>
   </div>
 </template>
 
 <script setup lang="ts">
-definePageMeta({ layout: 'admin' })
+/**
+ * Пользователи системы: список и смена роли (GET/PATCH /admin/users).
+ * Собственную роль менять нельзя — backend отвечает 400, а выбор заблокирован и
+ * на клиенте: администратор без роли потерял бы доступ к панели.
+ */
+import { computed, onMounted, ref } from 'vue'
+import { useAuth } from '~/composables/useAuth'
+import type { UserRole } from '~/composables/useAuth'
 
-// Mock data for demonstration
-const users = ref([
-  { id: '1dcf548d-4557-4d43-93a4-db033fa4718e', email: 'admin@example.com', role: 'admin', created_at: '2023-01-01T00:00:00Z' },
-  { id: '2', email: 'manager@example.com', role: 'manager', created_at: '2023-01-02T00:00:00Z' },
-])
+definePageMeta({ layout: 'workspace' })
 
-async function updateRole(user: any) {
-  // TODO: Implement API call to update user role
-  console.log('Update role for', user.email, 'to', user.role)
+/** Ответ backend: app/schemas/user.py (UserResponse). */
+interface AdminUser {
+  id: string
+  email: string
+  role: UserRole
+  created_at: string
 }
 
-function editUser(user: any) {
-  console.log('Edit user', user.id)
+const { user: currentUser } = useAuth()
+const { $api } = useNuxtApp() as any
+
+const users = ref<AdminUser[]>([])
+const isLoading = ref(false)
+const error = ref('')
+const busyIds = ref<string[]>([])
+
+const currentUserId = computed(() => currentUser.value?.id ?? '')
+
+function isBusy(user: AdminUser) {
+  return busyIds.value.includes(user.id)
 }
 
-async function deleteUser(id: string) {
-  if (confirm('Are you sure you want to delete this user?')) {
-    // TODO: Implement API call to delete user
-    console.log('Delete user', id)
+function formatDate(value: string) {
+  return new Date(value).toLocaleDateString('ru-RU')
+}
+
+async function loadUsers() {
+  isLoading.value = true
+  error.value = ''
+  try {
+    const response = await $api('/admin/users')
+    users.value = response.users
+  } catch (err: any) {
+    error.value = err?.data?.detail || 'Не удалось загрузить список пользователей'
+  } finally {
+    isLoading.value = false
   }
 }
+
+async function updateRole(user: AdminUser) {
+  busyIds.value = [...busyIds.value, user.id]
+  error.value = ''
+  try {
+    const updated = await $api(`/admin/users/${user.id}`, {
+      method: 'PATCH',
+      body: { role: user.role },
+    })
+    user.role = updated.role
+  } catch (err: any) {
+    error.value = err?.data?.detail || 'Не удалось изменить роль'
+    await loadUsers()
+  } finally {
+    busyIds.value = busyIds.value.filter((id) => id !== user.id)
+  }
+}
+
+onMounted(loadUsers)
 </script>

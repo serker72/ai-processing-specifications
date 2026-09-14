@@ -1,11 +1,13 @@
 <template>
   <div class="page-container page-container-narrow">
-    <h1>Рабочее место менеджера</h1>
+    <h1>Загрузка спецификации</h1>
     <div class="mb-5 flex flex-wrap gap-2">
       <button class="btn-action" @click="handleUpload" :disabled="isUploading">
         {{ isUploading ? 'Загрузка...' : 'Загрузить спецификацию' }}
       </button>
-      <button class="btn-secondary" @click="handleLogout">Выйти</button>
+      <NuxtLink to="/manager/uploads" class="btn-secondary btn-link">
+        Список спецификаций
+      </NuxtLink>
     </div>
     <input
       v-if="!isUploading"
@@ -19,6 +21,7 @@
       <h3>Результат загрузки:</h3>
       <pre>{{ JSON.stringify(uploadResult, null, 2) }}</pre>
     </div>
+    <p v-if="error" class="text-danger">{{ error }}</p>
     <div v-if="sseMessages.length > 0" class="sse-log">
       <h3>События обработки:</h3>
       <ul>
@@ -31,13 +34,16 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { useFingerprint } from '~/composables/useFingerprint'
-import { useAuth } from '~/composables/useAuth'
 
-const { logout } = useAuth()
+definePageMeta({ layout: 'workspace' })
+
 const { init: initFingerprint } = useFingerprint()
+// $api — API-клиент из plugins/api.ts: credentials и повтор запроса после 401
+const { $api } = useNuxtApp() as any
 const fileInput = ref<any>(null)
 const isUploading = ref(false)
 const uploadResult = ref<any>(null)
+const error = ref('')
 const sseMessages = ref<string[]>([])
 
 let eventSource: EventSource | null = null
@@ -63,17 +69,16 @@ async function handleFileSelect(event: Event) {
   isUploading.value = true
   uploadResult.value = null
   sseMessages.value = []
+  error.value = ''
 
   try {
     const formData = new FormData()
     formData.append('file', file)
 
-    // Загружаем спецификацию
-    const response = await $fetch('/manager/specifications', {
-      baseURL: useRuntimeConfig().public.apiBase,
+    // Загружаем спецификацию: FormData, заголовок Content-Type ставит ofetch
+    const response = await $api('/manager/specifications', {
       method: 'POST',
       body: formData,
-      credentials: 'include',
     })
 
     uploadResult.value = response
@@ -81,7 +86,7 @@ async function handleFileSelect(event: Event) {
     // Подписываемся на SSE-поток
     subscribeToSSE(response.upload_id)
   } catch (err: any) {
-    console.error('Upload failed:', err)
+    error.value = err?.data?.detail || 'Не удалось загрузить спецификацию'
   } finally {
     isUploading.value = false
   }
@@ -113,9 +118,4 @@ function subscribeToSSE(uploadId: string) {
 onBeforeUnmount(() => {
   eventSource?.close()
 })
-
-async function handleLogout() {
-  await logout()
-  navigateTo('/login')
-}
 </script>

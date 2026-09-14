@@ -1,69 +1,119 @@
 <template>
   <div class="page-container">
-    <h1>Управление сессиями</h1>
-    
-    <div class="table-wrapper overflow-x-auto">
-      <table class="data-table">
+    <h1>Активные сессии</h1>
+
+    <div class="mb-5">
+      <button class="btn-secondary" :disabled="isLoading" @click="loadSessions">
+        {{ isLoading ? 'Обновление...' : 'Обновить' }}
+      </button>
+    </div>
+
+    <div class="table-wrapper">
+      <table v-if="sessions.length" class="data-table">
         <thead>
           <tr>
-            <th>User ID</th>
-            <th>Fingerprint</th>
-            <th>IP Address</th>
-            <th>Создана</th>
-            <th>Истекает</th>
+            <th>Пользователь</th>
+            <th>Отпечаток устройства</th>
+            <th>Доступен до</th>
             <th>Действия</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="session in sessions" :key="session.id">
-            <td>{{ session.user_id }}</td>
-            <td class="mono">{{ session.fingerprint }}</td>
-            <td>{{ session.ip_address }}</td>
-            <td>{{ new Date(session.created_at).toLocaleString() }}</td>
-            <td>{{ new Date(session.expires_at).toLocaleString() }}</td>
+          <tr v-for="session in sessions" :key="rowKey(session)">
+            <td>{{ session.email || session.user_id }}</td>
+            <td class="mono" :title="session.fingerprint_hash">
+              {{ shortHash(session.fingerprint_hash) }}
+            </td>
+            <td>{{ formatDateTime(session.expires_at) }}</td>
             <td>
-              <button class="btn-revoke" @click="revokeSession(session.id)">Отозвать</button>
+              <button
+                class="btn-revoke"
+                :disabled="busyKeys.includes(rowKey(session))"
+                @click="revoke(session)"
+              >
+                Отозвать
+              </button>
             </td>
           </tr>
         </tbody>
       </table>
+      <div v-else class="empty-state">
+        {{ isLoading ? 'Загрузка списка…' : 'Активных сессий нет' }}
+      </div>
     </div>
 
-    <div v-if="!sessions.length" class="empty-state">
-      Нет активных сессий
-    </div>
+    <p v-if="error" class="text-danger">{{ error }}</p>
+    <p class="text-muted text-sm mt-4">
+      Доступен refresh-токен сессии: после отзыва обновить токены не получится,
+      а текущий access-токен доживёт до конца своего короткого срока.
+    </p>
   </div>
 </template>
 
 <script setup lang="ts">
-definePageMeta({ layout: 'admin' })
+/**
+ * Активные сессии (GET/DELETE /admin/sessions): список читается из Redis,
+ * отзыв удаляет ключ сессии и отправляет jti refresh-токена в blacklist.
+ */
+import { onMounted, ref } from 'vue'
 
-// Mock data for demonstration
-const sessions = ref([
-  { 
-    id: 'sess-1', 
-    user_id: '1dcf548d-4557-4d43-93a4-db033fa4718e', 
-    fingerprint: '283628ad0c50441d9b93538c6ad99784fddbdce0fc2b96124c70cbf4b0789753', 
-    ip_address: '127.0.0.1', 
-    created_at: '2023-09-08T10:00:00Z', 
-    expires_at: '2023-09-15T10:00:00Z' 
-  },
-  { 
-    id: 'sess-2', 
-    user_id: '2', 
-    fingerprint: '57e19849a701070071cd3ee1231c5b5714cabaa9458ab16033a6e4f47bba932a', 
-    ip_address: '192.168.1.10', 
-    created_at: '2023-09-07T15:30:00Z', 
-    expires_at: '2023-09-14T15:30:00Z' 
-  },
-])
+definePageMeta({ layout: 'workspace' })
 
-async function revokeSession(sessionId: string) {
-  if (confirm('Are you sure you want to revoke this session?')) {
-    // TODO: Implement API call to revoke session
-    console.log('Revoke session', sessionId)
-    // Remove from local list for immediate feedback
-    sessions.value = sessions.value.filter(s => s.id !== sessionId)
+/** Ответ backend: app/schemas/session.py (SessionItem). */
+interface SessionRow {
+  user_id: string
+  email: string
+  fingerprint_hash: string
+  expires_at: string
+}
+
+const { $api } = useNuxtApp() as any
+
+const sessions = ref<SessionRow[]>([])
+const isLoading = ref(false)
+const error = ref('')
+const busyKeys = ref<string[]>([])
+
+function rowKey(session: SessionRow) {
+  return `${session.user_id}:${session.fingerprint_hash}`
+}
+
+function shortHash(hash: string) {
+  return `${hash.slice(0, 12)}…${hash.slice(-4)}`
+}
+
+function formatDateTime(value: string) {
+  return new Date(value).toLocaleString('ru-RU')
+}
+
+async function loadSessions() {
+  isLoading.value = true
+  error.value = ''
+  try {
+    const response = await $api('/admin/sessions')
+    sessions.value = response.sessions
+  } catch (err: any) {
+    error.value = err?.data?.detail || 'Не удалось загрузить список сессий'
+  } finally {
+    isLoading.value = false
   }
 }
+
+async function revoke(session: SessionRow) {
+  const key = rowKey(session)
+  busyKeys.value = [...busyKeys.value, key]
+  error.value = ''
+  try {
+    await $api(`/admin/sessions/${session.user_id}/${session.fingerprint_hash}`, {
+      method: 'DELETE',
+    })
+    sessions.value = sessions.value.filter((item) => rowKey(item) !== key)
+  } catch (err: any) {
+    error.value = err?.data?.detail || 'Не удалось отозвать сессию'
+  } finally {
+    busyKeys.value = busyKeys.value.filter((item) => item !== key)
+  }
+}
+
+onMounted(loadSessions)
 </script>

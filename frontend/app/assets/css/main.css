@@ -231,6 +231,7 @@ form:not(.was-validated) .form-control.is-invalid ~ .invalid-feedback {
 .btn-upload,
 .btn-submit,
 .btn-edit,
+.btn-secondary,
 .btn-delete,
 .btn-revoke,
 .btn-action,
@@ -315,6 +316,13 @@ form:not(.was-validated) .form-control.is-invalid ~ .invalid-feedback {
 
 .btn-icon.danger {
   color: var(--app-danger);
+}
+
+/* Ссылка, оформленная как кнопка (переход между разделами кабинета). */
+.btn-link {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
 }
 
 .form-group {
@@ -470,9 +478,11 @@ code {
   color: var(--app-danger-fg);
 }
 
-/* processing — «в работе» (информационный), upcoming — ожидающийся шаблон КП. */
+/* processing — «в работе» (информационный), upcoming — ожидающийся шаблон КП,
+   mapping_predicted — маппинг колонок предсказан LLM, ждёт обработки. */
 .status-badge.processing,
-.status-badge.upcoming {
+.status-badge.upcoming,
+.status-badge.mapping_predicted {
   background: var(--app-info-bg);
   color: var(--app-info-fg);
 }
