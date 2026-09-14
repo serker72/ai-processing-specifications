@@ -1,90 +1,130 @@
-"""Celery-таски для фоновой векторизации каталога и обработки спецификаций (Модули 3 и 5)."""
+"""Celery-таски для фоновой векторизации каталога и обработки спецификаций (Модули 3 и 5).
+
+Обе таски работают в собственном event loop (`asyncio.new_event_loop`) и в
+собственной сессии БД: коммит выполняется по батчам, чтобы прогресс был виден
+подписчикам SSE и списку загрузок ещё до окончания обработки файла.
+Статусы загрузки берутся только из `UploadStatus` — `RowStatus` описывает
+строку и к статусу файла отношения не имеет.
+"""
 
 import asyncio
 from typing import Any
+from uuid import UUID
 
 from app.schemas.sse_events import ProgressEvent, RowMatchEvent
 from app.worker import celery_app
 
-BATCH_SIZE = 500  # Строк в одном батче
-
+BATCH_SIZE = 500  # Строк прайс-листа в одном батче векторизации
+BATCH_SIZE_SPEC = 100  # Строк спецификации в одном батче матчинга
 
 # Получаем экземпляр celery_app для регистрации таски
 _celery_app = celery_app
 
 
+def _run_async(coro_factory: Any) -> Any:
+    """Выполнить корутину в новом event loop (Celery-таска синхронная)."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro_factory())
+    finally:
+        loop.close()
+
+
+def _json_value(value: Any) -> Any:
+    """Значение ячейки Excel → JSON-совместимый тип для raw_data (JSONB).
+
+    Даты и Decimal сериализуются в строку, числа и строки остаются как есть:
+    иначе psycopg отклонит весь объект JSONB при вставке строки спецификации.
+    """
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    return str(value)
+
+
 @_celery_app.task(bind=True, name="catalog.vectorize")
 def vectorize_catalog(self: Any, upload_id: str) -> dict:
-    """Фоновая векторизация каталога из прайс-листа.
+    """Фоновая векторизация каталога из подтверждённого прайс-листа.
 
-    Батчами по BATCH_SIZE строк:
-    1. Читает файл из MinIO через PriceListService.
-    2. Для каждой строки вызывает EmbeddingService (768-dim).
-    3. Сохраняет embedding в CatalogItem.
+    Батчами по BATCH_SIZE строк: читает файл из MinIO по column_mapping,
+    генерирует эмбеддинги, выполняет UPSERT в CatalogItem по паре (sku, name).
+    Статус загрузки: processing → completed | failed.
     """
 
-    async def _run() -> dict:
-        from uuid import UUID
+    async def _mark_failed() -> None:
+        """Пометить загрузку ошибкой отдельной сессией (основная уже свёрнута)."""
+        from app.db.session import async_session_factory
+        from app.models.models import UploadStatus
+        from app.repositories.price_list_repository import PriceListRepository
 
+        async with async_session_factory() as session:
+            repo = PriceListRepository(session)
+            upload = await repo.get_by_id(UUID(upload_id))
+            if upload is not None:
+                await repo.update_status(upload.id, UploadStatus.failed)
+                await session.commit()
+
+    async def _run() -> dict:
         from app.db.session import async_session_factory
         from app.di.container import create_container
-        from app.models.models import CatalogItem
+        from app.models.models import UploadStatus
+        from app.repositories.catalog_repository import CatalogRepository
         from app.repositories.price_list_repository import PriceListRepository
         from app.services.embedding_service import EmbeddingService
         from app.services.price_list_service import PriceListService
 
         container = create_container()
-        async with container() as c, async_session_factory() as session:
-            price_list_repo = PriceListRepository(session)
-            upload = await price_list_repo.get_by_id(UUID(upload_id))
-            if not upload:
-                return {"error": "upload not found", "upload_id": upload_id}
-
-            file_key = upload.file_key  # ключ в MinIO
-            column_mapping = upload.column_mapping
-            if not column_mapping:
-                return {"error": "no column_mapping", "upload_id": upload_id}
-
-            # 1. Прочитать данные прайс-листа (файл уже в MinIO)
-            minio_svc = await c.get(PriceListService)
-            rows = await minio_svc._parse_pricelist(file_key, column_mapping)
-
-            # 2. Векторизация батчами
+        async with container() as c:
             embedding_svc = await c.get(EmbeddingService)
+            price_list_svc = await c.get(PriceListService)
 
-            total = len(rows)
-            for i in range(0, total, BATCH_SIZE):
-                batch = rows[i : i + BATCH_SIZE]
-                embeddings = embedding_svc.embed_passages([r["description"] for r in batch])
+            async with async_session_factory() as session:
+                price_list_repo = PriceListRepository(session)
+                catalog_repo = CatalogRepository(session)
 
-                items = [
-                    CatalogItem(
-                        sku=r["sku"],
-                        name=r["name"],
-                        price=r.get("price"),
-                        embedding=list(emb),
-                    )
-                    for r, emb in zip(batch, embeddings)
-                ]
-                session.add_all(items)
-                await session.flush()
+                upload = await price_list_repo.get_by_id(UUID(upload_id))
+                if upload is None:
+                    return {"error": "upload not found", "upload_id": upload_id}
+                if not upload.column_mapping:
+                    return {"error": "no column_mapping", "upload_id": upload_id}
 
-            await session.commit()
+                file_key = upload.file_key
+                column_mapping = upload.column_mapping
+                await price_list_repo.update_status(upload.id, UploadStatus.processing)
+                await session.commit()
 
-            return {
-                "upload_id": upload_id,
-                "total_rows": total,
-                "status": "completed",
-            }
+                total = 0
+                try:
+                    rows = await price_list_svc.parse_pricelist(file_key, column_mapping)
+                    total = len(rows)
 
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(_run())
-    finally:
-        loop.close()
+                    for i in range(0, total, BATCH_SIZE):
+                        batch = rows[i : i + BATCH_SIZE]
+                        embeddings = embedding_svc.embed_passages([r["description"] for r in batch])
+                        items = [
+                            {
+                                "sku": r["sku"],
+                                "name": r["name"],
+                                "unit": r.get("unit"),
+                                "price": r.get("price"),
+                                "embedding": list(emb),
+                            }
+                            for r, emb in zip(batch, embeddings, strict=True)
+                        ]
+                        # UPSERT: повторная загрузка прайса обновляет позиции,
+                        # а не падает на уникальном индексе (sku, name)
+                        await catalog_repo.upsert_batch(items)
+                        await session.commit()
 
+                    await price_list_repo.update_status(upload.id, UploadStatus.completed)
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    await _mark_failed()
+                    raise
 
-BATCH_SIZE_SPEC = 100  # Строк спецификации в одном батче
+                return {"upload_id": upload_id, "total_rows": total, "status": "completed"}
+
+    return _run_async(_run)
 
 
 @_celery_app.task(bind=True, name="specification.process")
@@ -95,19 +135,16 @@ def process_specification(
 ) -> dict:
     """Фоновая обработка строк спецификации через Matching Engine.
 
-    Алгоритм:
-    1. Читает Excel из MinIO по column_mapping.
-    2. Для каждой строки вызывает MatchingEngine.
-    3. Сохраняет результат в SpecificationRow.
-    4. Публикует прогресс в Redis Pub/Sub (channel: spec_{upload_id}).
+    Алгоритм: читает Excel из MinIO по column_mapping, прогоняет строки через
+    MatchingService батчами по BATCH_SIZE_SPEC, пишет SpecificationRow,
+    публикует прогресс в Redis Pub/Sub (канал spec_{upload_id}).
+    Статус загрузки: processing → completed | failed.
     """
 
     async def _run() -> dict:
-        from uuid import UUID
-
         from app.db.session import async_session_factory
         from app.di.container import create_container
-        from app.models.models import MatchType, RowStatus
+        from app.models.models import MatchType, RowStatus, UploadStatus
         from app.repositories.matching_repository import MatchingRepository
         from app.repositories.specification_repository import SpecificationRepository
         from app.services.embedding_service import EmbeddingService
@@ -119,175 +156,155 @@ def process_specification(
         redis_pubsub = RedisPubSub()
         channel = f"spec_{upload_id}"
 
-        try:
-            async with container() as c, async_session_factory() as session:
-                spec_repo = SpecificationRepository(session)
-                matching_repo = MatchingRepository(session)
-                embedding_svc = await c.get(EmbeddingService)
-                matching_svc = MatchingService(matching_repo, embedding_svc)
-                minio_svc = await c.get(MinioService)
-
-                # 1. Получить upload и column_mapping
-                upload = await spec_repo.get_by_id(UUID(upload_id))
-                if not upload:
-                    await redis_pubsub.publish(channel, ProgressEvent(
-                        upload_id=upload_id,
-                        processed=0,
-                        total=0,
-                        status="error",
-                        message="Upload not found",
-                    ).model_dump_json())
-                    return {"error": "upload not found", "upload_id": upload_id}
-
-                column_mapping = upload.column_mapping
-                if not column_mapping:
-                    await redis_pubsub.publish(channel, ProgressEvent(
-                        upload_id=upload_id,
-                        processed=0,
-                        total=0,
-                        status="error",
-                        message="No column_mapping",
-                    ).model_dump_json())
-                    return {"error": "no column_mapping", "upload_id": upload_id}
-
-                # 2. Прочитать данные Excel из MinIO
-                file_key = upload.file_key
-                wb = await minio_svc.download_workbook(file_key)
-                ws = wb.active
-                rows_data = []
-                for row in ws.iter_rows(min_row=2, values_only=True):
-                    if any(cell is not None for cell in row):
-                        rows_data.append(row)
-
-                total = len(rows_data)
-                name_col = column_mapping.get("name_column")
-                qty_col = column_mapping.get("quantity_column")
-                unit_col = column_mapping.get("unit_column")
-                price_col = column_mapping.get("price_column")
-
-                # Найти индексы колонок по заголовку
-                headers = [str(cell) for cell in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
-                col_indices = {}
-                for col_key in (name_col, qty_col, unit_col, price_col):
-                    if col_key:
-                        try:
-                            idx = headers.index(col_key)
-                            col_indices[col_key] = idx
-                        except ValueError:
-                            pass
-
-                # 3. Обработка строк батчами
-                processed = 0
-                for i in range(0, total, BATCH_SIZE_SPEC):
-                    batch = rows_data[i : i + BATCH_SIZE_SPEC]
-                    for row_idx, row in enumerate(batch):
-                        row_num = i + row_idx + 2  # 1-indexed, +1 for header
-                        raw_name = str(
-                            row[col_indices.get("name_column", 0)]
-                        ) if col_indices.get("name_column") is not None else str(row[0])
-
-                        # Matching Engine
-                        match_result = await matching_svc.match_row(raw_name=raw_name)
-
-                        # Определить тип матчинга
-                        tier = match_result["tier"]
-                        if tier == "auto":
-                            match_type_enum = MatchType.auto
-                            row_status = RowStatus.matched
-                        elif tier == "top_n":
-                            match_type_enum = MatchType.top_n
-                            row_status = RowStatus.matched
-                        else:
-                            match_type_enum = MatchType.unmatched
-                            row_status = RowStatus.unmatched
-
-                        matched_item_id = (
-                            match_result["matched_item"]["id"]
-                            if match_result["matched_item"]
-                            else None
-                        )
-
-                        # Сохранить строку
-                        await spec_repo.create_row(
-                            upload_id=UUID(upload_id),
-                            row_number=row_num,
-                            raw_data={
-                                "raw_name": raw_name,
-                                "quantity": (
-                                    row[col_indices["quantity_column"]]
-                                    if "quantity_column" in col_indices
-                                    else None
-                                ),
-                                "unit": (
-                                    row[col_indices["unit_column"]]
-                                    if "unit_column" in col_indices
-                                    else None
-                                ),
-                                "price": (
-                                    row[col_indices["price_column"]]
-                                    if "price_column" in col_indices
-                                    else None
-                                ),
-                            },
-                            matched_item_id=matched_item_id,
-                            match_type=match_type_enum.value,
-                            status=row_status.value,
-                        )
-
-                        processed += 1
-
-                        # Публикация прогресса
-                        await redis_pubsub.publish(channel, RowMatchEvent(
-                            upload_id=upload_id,
-                            row_number=row_num,
-                            raw_name=raw_name,
-                            matched_item_id=matched_item_id,
-                            match_type=tier,
-                            status=row_status.value,
-                            score=match_result["score"],
-                            message=(
-                                f"Processed row {row_num}: {tier}"
-                                if tier != "unmatched"
-                                else f"Unmatched row {row_num}"
-                            ),
-                        ).model_dump_json())
-
-                    # Обновить статус upload
-                    await spec_repo.update_status(
-                        UUID(upload_id),
-                        RowStatus.processing if processed < total else RowStatus.matched,
-                    )
-
-                await redis_pubsub.publish(channel, ProgressEvent(
+        async def publish_progress(processed: int, total: int, status: str, message: str) -> None:
+            """Опубликовать событие прогресса в канал загрузки."""
+            await redis_pubsub.publish(
+                channel,
+                ProgressEvent(
                     upload_id=upload_id,
                     processed=processed,
                     total=total,
-                    status="completed",
-                    message=f"Processed {processed}/{total} rows",
-                ).model_dump_json())
+                    status=status,
+                    message=message,
+                ).model_dump_json(),
+            )
 
-                return {
-                    "upload_id": upload_id,
-                    "processed": processed,
-                    "total": total,
-                    "status": "completed",
-                }
+        try:
+            async with container() as c:
+                embedding_svc = await c.get(EmbeddingService)
+                minio_svc = await c.get(MinioService)
 
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            await redis_pubsub.publish(channel, ProgressEvent(
-                upload_id=upload_id,
-                processed=0,
-                total=0,
-                status="error",
-                message=str(e),
-            ).model_dump_json())
+                async with async_session_factory() as session:
+                    spec_repo = SpecificationRepository(session)
+                    matching_svc = MatchingService(MatchingRepository(session), embedding_svc)
+
+                    upload = await spec_repo.get_by_id(UUID(upload_id))
+                    if upload is None:
+                        await publish_progress(0, 0, "error", "Загрузка не найдена")
+                        return {"error": "upload not found", "upload_id": upload_id}
+                    if not upload.column_mapping:
+                        await publish_progress(0, 0, "error", "Маппинг колонок не подтверждён")
+                        return {"error": "no column_mapping", "upload_id": upload_id}
+
+                    file_key = upload.file_key
+                    column_mapping = upload.column_mapping
+                    await spec_repo.update_status(upload.id, UploadStatus.processing)
+                    await session.commit()
+
+                    # Лист: первая непустая строка — заголовки, дальше — данные
+                    wb = await minio_svc.download_workbook(file_key)
+                    ws = wb.active
+                    sheet_rows = [row for row in ws.iter_rows(values_only=True) if any(v is not None for v in row)]
+                    wb.close()
+
+                    if len(sheet_rows) < 2:
+                        await spec_repo.update_status(upload.id, UploadStatus.completed)
+                        await session.commit()
+                        await publish_progress(0, 0, "completed", "В файле нет строк данных")
+                        return {"upload_id": upload_id, "processed": 0, "total": 0, "status": "completed"}
+
+                    headers = [str(h) if h is not None else "" for h in sheet_rows[0]]
+                    rows_data = sheet_rows[1:]
+
+                    # Индексы колонок по маппингу: роль → номер колонки в листе
+                    role_keys = {
+                        "name_column": "name",
+                        "quantity_column": "quantity",
+                        "unit_column": "unit",
+                        "price_column": "price",
+                    }
+                    col_idx: dict[str, int] = {}
+                    for map_key, role in role_keys.items():
+                        title = column_mapping.get(map_key)
+                        if title and title in headers:
+                            col_idx[role] = headers.index(title)
+
+                    def cell(row: tuple, role: str) -> Any:
+                        """Значение колонки роли в строке (None, если колонки нет)."""
+                        idx = col_idx.get(role)
+                        if idx is None or idx >= len(row):
+                            return None
+                        return row[idx]
+
+                    total = len(rows_data)
+                    processed = 0
+
+                    for i in range(0, total, BATCH_SIZE_SPEC):
+                        batch = rows_data[i : i + BATCH_SIZE_SPEC]
+                        for offset, row in enumerate(batch):
+                            row_num = i + offset + 2  # 1-индексация, +1 на строку заголовков
+                            raw_name = str(cell(row, "name") or "").strip() or str(row[0] or "").strip()
+                            if not raw_name:
+                                continue  # Пустая строка не участвует в матчинге
+
+                            match_result = await matching_svc.match_row(raw_name=raw_name)
+                            tier = match_result["tier"]
+                            matched_id = (
+                                match_result["matched_item"]["id"] if match_result["matched_item"] else None
+                            )
+
+                            if tier == "unmatched":
+                                match_type_enum, row_status = MatchType.unmatched, RowStatus.unmatched
+                            elif tier == "top_n":
+                                match_type_enum, row_status = MatchType.top_n, RowStatus.matched
+                            else:
+                                match_type_enum, row_status = MatchType.auto, RowStatus.matched
+
+                            await spec_repo.create_row(
+                                upload_id=UUID(upload_id),
+                                row_number=row_num,
+                                raw_data={
+                                    "raw_name": raw_name,
+                                    "quantity": _json_value(cell(row, "quantity")),
+                                    "unit": _json_value(cell(row, "unit")),
+                                    "price": _json_value(cell(row, "price")),
+                                },
+                                matched_item_id=UUID(matched_id) if matched_id else None,
+                                match_type=match_type_enum.value,
+                                status=row_status.value,
+                            )
+
+                            processed += 1
+
+                            await redis_pubsub.publish(
+                                channel,
+                                RowMatchEvent(
+                                    upload_id=upload_id,
+                                    row_number=row_num,
+                                    raw_name=raw_name,
+                                    matched_item_id=matched_id,
+                                    match_type=tier,
+                                    status=row_status.value,
+                                    score=match_result["score"],
+                                    message=f"Строка {row_num}: {tier}",
+                                ).model_dump_json(),
+                            )
+
+                        # Прогресс виден в UI до окончания обработки всего файла
+                        await session.commit()
+                        await publish_progress(processed, total, "processing", f"Обработано {processed}/{total} строк")
+
+                    await spec_repo.update_status(upload.id, UploadStatus.completed)
+                    await session.commit()
+                    await publish_progress(processed, total, "completed", f"Обработано {processed}/{total} строк")
+
+                    return {
+                        "upload_id": upload_id,
+                        "processed": processed,
+                        "total": total,
+                        "status": "completed",
+                    }
+
+        except Exception as exc:
+            async with async_session_factory() as session_failed:
+                failed_repo = SpecificationRepository(session_failed)
+                upload = await failed_repo.get_by_id(UUID(upload_id))
+                if upload is not None:
+                    await failed_repo.update_status(upload.id, UploadStatus.failed)
+                    await session_failed.commit()
+            await publish_progress(0, 0, "error", str(exc))
             raise
+        finally:
+            await redis_pubsub.close()
 
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(_run())
-    finally:
-        loop.close()
-
+    return _run_async(_run)

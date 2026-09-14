@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings, get_settings
 from app.db.session import async_session_factory
+from app.repositories.catalog_repository import CatalogRepository
+from app.repositories.device_repository import DeviceRepository
 from app.repositories.matching_repository import MatchingRepository
 from app.repositories.price_list_repository import PriceListRepository
 from app.repositories.proposal_template_repository import ProposalTemplateRepository
@@ -18,6 +20,8 @@ from app.repositories.session_repository import SessionRepository
 from app.repositories.specification_repository import SpecificationRepository
 from app.repositories.user_repository import UserRepository
 from app.services.auth_service import AuthService
+from app.services.catalog_service import CatalogService
+from app.services.device_service import DeviceService
 from app.services.embedding_service import EmbeddingService
 from app.services.excel_preview_service import ExcelPreviewService
 from app.services.llm_service import LlmService
@@ -26,7 +30,9 @@ from app.services.minio_service import MinioService
 from app.services.price_list_service import PriceListService
 from app.services.proposal_template_service import ProposalTemplateService
 from app.services.security import SecurityService
+from app.services.session_admin_service import SessionAdminService
 from app.services.specification_service import SpecificationService
+from app.services.user_service import UserService
 
 
 class SettingsProvider(Provider):
@@ -75,6 +81,14 @@ class RepositoryProvider(Provider):
     @provide
     def provide_session_repository(self, redis: Redis) -> SessionRepository:
         return SessionRepository(redis)
+
+    @provide
+    def provide_device_repository(self, session: AsyncSession) -> DeviceRepository:
+        return DeviceRepository(session)
+
+    @provide
+    def provide_catalog_repository(self, session: AsyncSession) -> CatalogRepository:
+        return CatalogRepository(session)
 
     @provide
     def provide_price_list_repository(self, session: AsyncSession) -> PriceListRepository:
@@ -156,8 +170,34 @@ class ServiceProvider(Provider):
         session_repository: SessionRepository,
         security_service: SecurityService,
         settings: Settings,
+        device_repository: DeviceRepository,
     ) -> AuthService:
-        return AuthService(user_repository, session_repository, security_service, settings)
+        return AuthService(user_repository, session_repository, security_service, settings, device_repository)
+
+    @provide
+    def provide_user_service(self, user_repository: UserRepository) -> UserService:
+        return UserService(user_repository)
+
+    @provide
+    def provide_session_admin_service(
+        self,
+        session_repository: SessionRepository,
+        user_repository: UserRepository,
+        security_service: SecurityService,
+    ) -> SessionAdminService:
+        return SessionAdminService(session_repository, user_repository, security_service)
+
+    @provide
+    def provide_device_service(
+        self,
+        device_repository: DeviceRepository,
+        session_admin_service: SessionAdminService,
+    ) -> DeviceService:
+        return DeviceService(device_repository, session_admin_service)
+
+    @provide
+    def provide_catalog_service(self, catalog_repository: CatalogRepository) -> CatalogService:
+        return CatalogService(catalog_repository)
 
     @provide
     def provide_price_list_service(

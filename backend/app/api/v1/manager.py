@@ -7,24 +7,39 @@
 
 import asyncio
 from typing import Annotated
+from uuid import UUID
 
 from dishka.integrations.fastapi import DishkaRoute, FromDishka
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_current_manager
 from app.core.config import Settings
 from app.core.messages import CommonMessages
+from app.models.models import User
 from app.repositories.session_repository import SessionRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.confirm_match import ConfirmMatchRequest, ConfirmMatchResponse
 from app.schemas.matching import MatchRequest, MatchResponse
+from app.schemas.specification import (
+    SpecificationRowListResponse,
+    SpecificationUploadDetail,
+    SpecificationUploadListResponse,
+)
 from app.services.matching_service import MatchingService
 from app.services.security import SecurityService
 from app.services.specification_service import FileTooLargeError, SpecificationService
 from app.worker.tasks import process_specification
 
 manager_router = APIRouter(route_class=DishkaRoute, prefix="/manager", tags=["manager"])
+
+
+def parse_upload_id(upload_id: str) -> UUID:
+    """UUID загрузки из пути маршрута; неверный формат — 404 (объекта с таким нет)."""
+    try:
+        return UUID(upload_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=CommonMessages.NOT_FOUND) from None
 
 
 @manager_router.post(
@@ -97,6 +112,119 @@ async def confirm_match(
 
 
 @manager_router.get(
+    "/specifications",
+    response_model=SpecificationUploadListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Список ранее загруженных спецификаций",
+)
+async def list_specifications(
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    specification_service: FromDishka[SpecificationService],
+) -> SpecificationUploadListResponse:
+    """Загрузки спецификаций текущего менеджера: свежие — первыми."""
+    manager: User = await get_current_manager(
+        request, settings, security_service, session_repository, user_repository
+    )
+
+    try:
+        uploads = await specification_service.list_uploads(manager.id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+    return SpecificationUploadListResponse(uploads=uploads)
+
+
+@manager_router.get(
+    "/specifications/{upload_id}",
+    response_model=SpecificationUploadDetail,
+    status_code=status.HTTP_200_OK,
+    summary="Карточка спецификации: статус обработки и сводка по строкам",
+)
+async def get_specification(
+    upload_id: str,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    specification_service: FromDishka[SpecificationService],
+) -> SpecificationUploadDetail:
+    """Спецификация текущего менеджера: файл, статус, маппинг, счётчики строк."""
+    manager: User = await get_current_manager(
+        request, settings, security_service, session_repository, user_repository
+    )
+
+    try:
+        detail = await specification_service.get_upload(parse_upload_id(upload_id), manager.id)
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+    return detail
+
+
+@manager_router.get(
+    "/specifications/{upload_id}/rows",
+    response_model=SpecificationRowListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Страница строк спецификации с результатами матчинга",
+)
+async def list_specification_rows(
+    upload_id: str,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    specification_service: FromDishka[SpecificationService],
+    page: Annotated[int, Query(ge=1, description="Номер страницы")] = 1,
+    page_size: Annotated[int, Query(ge=1, le=500, description="Размер страницы")] = 50,
+    status_filter: Annotated[
+        str | None, Query(alias="status", description="Фильтр по статусу строки (RowStatus)")
+    ] = None,
+) -> SpecificationRowListResponse:
+    """Строки спецификации текущего менеджера: порядковые номера, матчинг, позиции каталога."""
+    manager: User = await get_current_manager(
+        request, settings, security_service, session_repository, user_repository
+    )
+
+    try:
+        rows, total = await specification_service.list_rows(
+            upload_id=parse_upload_id(upload_id),
+            manager_id=manager.id,
+            status=status_filter,
+            page=page,
+            page_size=page_size,
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+    return SpecificationRowListResponse(rows=rows, total=total, page=page, page_size=page_size)
+
+
+@manager_router.get(
     "/specifications/{upload_id}/stream",
     summary="SSE-поток обработки спецификации (Real-Time прогресс)",
 )
@@ -107,13 +235,21 @@ async def stream_specification_progress(
     security_service: FromDishka[SecurityService],
     session_repository: FromDishka[SessionRepository],
     user_repository: FromDishka[UserRepository],
+    specification_service: FromDishka[SpecificationService],
 ) -> StreamingResponse:
     """SSE-эндпоинт для real-time отслеживания обработки спецификации.
 
     Клиент подписывается на Redis Pub/Sub канал `spec_{upload_id}` и получает
     события по мере обработки каждой строки Matching Engine.
     """
-    await get_current_manager(request, settings, security_service, session_repository, user_repository)
+    manager: User = await get_current_manager(
+        request, settings, security_service, session_repository, user_repository
+    )
+    # Подписка только на собственную загрузку: канал чужого upload_id недоступен
+    try:
+        await specification_service.get_upload(parse_upload_id(upload_id), manager.id)
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
 
     from app.worker.redis_pubsub import RedisPubSub
 
@@ -166,8 +302,6 @@ async def upload_specification(
     specification_service: FromDishka[SpecificationService],
 ) -> dict:
     """Загрузить Excel-спецификацию: потоковая загрузка в MinIO, превью 50 строк, LLM-маппинг колонок."""
-    from app.models.models import User
-
     manager: User = await get_current_manager(
         request, settings, security_service, session_repository, user_repository
     )
@@ -182,8 +316,11 @@ async def upload_specification(
             manager_id=manager.id,
         )
 
-        # Запустить фоновую обработку строк через Matching Engine
+        # Запустить фоновую обработку строк через Matching Engine.
+        # Commit до .delay(): иначе воркер выберет задачу раньше, чем upload
+        # станет виден в базе, и обработает несуществующую загрузку.
         upload_id = result["upload_id"]
+        await specification_service.commit_upload()
         process_specification.delay(upload_id, str(manager.id))
 
     except FileTooLargeError as e:

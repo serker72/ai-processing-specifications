@@ -28,3 +28,10 @@ class AuthMessages:
     REFRESH_TOKEN_MISSING = "Refresh-токен отсутствует"
     TOKEN_REVOKED = "Токен отозван"
     USER_NOT_FOUND = "Пользователь не найден"
+    DEVICE_BLOCKED = "Вход с этого устройства заблокирован"
+
+
+class UserMessages:
+    """Сообщения управления пользователями (панель администратора)."""
+
+    ROLE_SELF_CHANGE = "Нельзя изменить собственную роль"

@@ -12,7 +12,7 @@ from datetime import date
 from typing import Annotated
 
 from dishka.integrations.fastapi import DishkaRoute, FromDishka
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile, status
 
 from app.api.deps import get_current_admin
 from app.core.config import Settings
@@ -20,17 +20,70 @@ from app.core.messages import CommonMessages
 from app.models.models import User
 from app.repositories.session_repository import SessionRepository
 from app.repositories.user_repository import UserRepository
+from app.schemas.catalog import CatalogItemResponse, CatalogListResponse
 from app.schemas.confirm_mapping import ConfirmMappingRequest, ConfirmMappingResponse
+from app.schemas.price_list import PriceListListResponse
 from app.schemas.proposal_template import (
     ProposalTemplateListResponse,
     ProposalTemplateResponse,
     ProposalTemplateUpdate,
 )
+from app.services.catalog_service import CatalogService
 from app.services.price_list_service import FileTooLargeError, PriceListService
 from app.services.proposal_template_service import ProposalTemplateService
 from app.services.security import SecurityService
+from app.worker.tasks import vectorize_catalog
 
 admin_router = APIRouter(route_class=DishkaRoute, prefix="/admin", tags=["admin"])
+
+
+@admin_router.get(
+    "/pricelists",
+    response_model=PriceListListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="История загрузок прайс-листов",
+)
+async def list_pricelists(
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    price_list_service: FromDishka[PriceListService],
+) -> PriceListListResponse:
+    """Загрузки прайс-листов со статусами обработки (свежие — первыми)."""
+    await get_current_admin(request, settings, security_service, session_repository, user_repository)
+
+    return PriceListListResponse(uploads=await price_list_service.list_uploads())
+
+
+@admin_router.get(
+    "/catalog",
+    response_model=CatalogListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Каталог номенклатуры (страницами, с поиском)",
+)
+async def list_catalog(
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    catalog_service: FromDishka[CatalogService],
+    page: Annotated[int, Query(ge=1, description="Номер страницы")] = 1,
+    page_size: Annotated[int, Query(ge=1, le=200, description="Размер страницы")] = 50,
+    search: Annotated[str | None, Query(description="Подстрока в наименовании или артикуле")] = None,
+) -> CatalogListResponse:
+    """Позиции каталога, загруженные из прайс-листов."""
+    await get_current_admin(request, settings, security_service, session_repository, user_repository)
+
+    items, total = await catalog_service.list_items(search=search, page=page, page_size=page_size)
+    return CatalogListResponse(
+        items=[CatalogItemResponse.from_item(item) for item in items],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @admin_router.post(
@@ -106,6 +159,13 @@ async def confirm_pricelist_mapping(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=CommonMessages.INTERNAL_ERROR,
         ) from e
+
+    # Векторизация каталога — только после подтверждения маппинга (иначе прайс
+    # так и останется предсказанным, а catalog_items — пустым).
+    # Commit до .delay(): воркер не должен увидеть задачу раньше, чем
+    # подтверждённый маппинг станет виден в базе.
+    await price_list_service.commit_upload()
+    vectorize_catalog.delay(upload_id)
 
     return result
 

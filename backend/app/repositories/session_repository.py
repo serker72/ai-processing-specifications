@@ -5,10 +5,22 @@
 - revoked:{jti} — отметка отозванного токена (TTL = остаток жизни токена).
 """
 
+from dataclasses import dataclass
+
 from redis.asyncio import Redis
 
 _SESSION_PREFIX = "session"
 _REVOKED_PREFIX = "revoked"
+
+
+@dataclass(frozen=True)
+class SessionRecord:
+    """Запись активной сессии из Redis: ключ, TTL и refresh-токен."""
+
+    user_id: str
+    fingerprint_hash: str
+    ttl_seconds: int
+    refresh_token: str
 
 
 class SessionRepository:
@@ -50,3 +62,35 @@ class SessionRepository:
     async def is_jti_revoked(self, jti: str) -> bool:
         """Проверить, отозван ли токен (есть ли в blacklist)."""
         return bool(await self._redis.exists(self._revoked_key(jti)))
+
+    async def list_sessions(self, user_id: str | None = None) -> list[SessionRecord]:
+        """Перечислить активные сессии (при user_id — только сессии этого пользователя).
+
+        Ключи вида `session:{user_id}:{fingerprint_hash}`; user_id — UUID,
+        fingerprint_hash — 64 hex-символов, поэтому правая часть ключа
+        однозначно отделяется одним разделителем. Отбор по пользователю
+        выполняется самим шаблоном SCAN, а не фильтрацией результата.
+        """
+        pattern = f"{_SESSION_PREFIX}:{user_id}:*" if user_id else f"{_SESSION_PREFIX}:*"
+        sessions: list[SessionRecord] = []
+
+        async for raw_key in self._redis.scan_iter(match=pattern, count=100):
+            key = raw_key.decode("utf-8") if isinstance(raw_key, bytes) else raw_key
+            _, _, remainder = key.partition(":")
+            stored_user_id, _, fingerprint_hash = remainder.rpartition(":")
+            if not stored_user_id or not fingerprint_hash:
+                continue
+            ttl = await self._redis.ttl(key)
+            refresh_token = await self._redis.get(key)
+            if refresh_token is None:
+                # Ключ удалён между SCAN и GET (сессия истекла) — пропускаем
+                continue
+            sessions.append(
+                SessionRecord(
+                    user_id=stored_user_id,
+                    fingerprint_hash=fingerprint_hash,
+                    ttl_seconds=int(ttl),
+                    refresh_token=refresh_token.decode("utf-8") if isinstance(refresh_token, bytes) else refresh_token,
+                )
+            )
+        return sessions

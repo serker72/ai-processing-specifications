@@ -2,7 +2,9 @@
 
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.models import PriceListUpload, UploadStatus
 
@@ -32,6 +34,23 @@ class PriceListRepository:
     async def get_by_id(self, upload_id: UUID) -> PriceListUpload | None:
         """Получить сессию загрузки по ID."""
         return await self._session.get(PriceListUpload, upload_id)
+
+    async def commit(self) -> None:
+        """Зафиксировать запись о загрузке до постановки Celery-таски в очередь.
+
+        Иначе воркер может выбрать задачу раньше, чем unit-of-work запроса
+        завершится коммитом, и не найти upload в базе.
+        """
+        await self._session.commit()
+
+    async def list_all(self) -> list[PriceListUpload]:
+        """Список загрузок прайс-листов (свежие — первыми) вместе с администратором."""
+        result = await self._session.execute(
+            select(PriceListUpload)
+            .options(selectinload(PriceListUpload.admin))
+            .order_by(PriceListUpload.created_at.desc())
+        )
+        return list(result.scalars().all())
 
     async def update_status(self, upload_id: UUID, status: UploadStatus) -> None:
         """Обновить статус обработки."""

@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1 import api_router
 from app.api.v1.admin import admin_router
+from app.api.v1.admin_access import admin_access_router
 from app.api.v1.manager import manager_router
 from app.core.config import get_settings
 from app.di.container import create_container
@@ -24,6 +25,7 @@ app.add_middleware(
 
 app.include_router(api_router, prefix=settings.backend.api_prefix)
 app.include_router(admin_router, prefix=settings.backend.api_prefix)
+app.include_router(admin_access_router, prefix=settings.backend.api_prefix)
 app.include_router(manager_router, prefix=settings.backend.api_prefix)
 setup_dishka(create_container(), app=app)
 

@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, String, Text, func
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -33,6 +33,29 @@ class User(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), comment="Время создания записи"
+    )
+
+
+class Device(Base):
+    """Fingerprint-устройство, с которого выполнялся вход (реестр для блокировки)."""
+
+    __tablename__ = "devices"
+    __table_args__ = ({"comment": "Зарегистрированные fingerprint-устройства"},)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, comment="Идентификатор устройства"
+    )
+    fingerprint_hash: Mapped[str] = mapped_column(
+        String(64), unique=True, comment="SHA-256 хэш fingerprint устройства"
+    )
+    blocked: Mapped[bool] = mapped_column(
+        Boolean, default=False, comment="Заблокирован ли вход с устройства"
+    )
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), comment="Время первого входа с устройства"
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), comment="Время последнего входа с устройства"
     )
 
 

@@ -4,10 +4,13 @@ import uuid
 from typing import Any
 
 from app.core.messages import CommonMessages
+from app.models.models import UploadStatus
 from app.repositories.price_list_repository import PriceListRepository
 from app.schemas.confirm_mapping import ConfirmMappingRequest
 from app.schemas.mapping import ColumnMappingPrediction
+from app.schemas.price_list import PriceListUploadItem
 from app.services.excel_preview_service import ExcelPreviewService
+from app.services.file_naming import StoredFileKey
 from app.services.llm_service import LlmService
 from app.services.minio_service import MinioService
 
@@ -35,6 +38,20 @@ class PriceListService:
         self._excel_preview = excel_preview
         self._llm = llm
         self._price_list_repo = price_list_repo
+
+    async def list_uploads(self) -> list[PriceListUploadItem]:
+        """История загрузок прайс-листов (свежие — первыми)."""
+        uploads = await self._price_list_repo.list_all()
+        return [
+            PriceListUploadItem(
+                id=str(upload.id),
+                filename=StoredFileKey.original_name(upload.file_key),
+                admin_email=upload.admin.email if upload.admin else "",
+                status=upload.status.value,
+                created_at=upload.created_at,
+            )
+            for upload in uploads
+        ]
 
     async def upload_and_predict(
         self,
@@ -76,12 +93,13 @@ class PriceListService:
         sample_rows = preview["rows"][: self.SAMPLE_ROWS_FOR_LLM]
         predicted_mapping = await self._predict_column_mapping(preview["headers"], sample_rows)
 
-        # 4. Сохранить запись в БД
+        # 4. Сохранить запись в БД: маппинг + статус «ожидает подтверждения админом»
         upload = await self._price_list_repo.create(
             admin_id=admin_id,
             file_key=file_key,
         )
         await self._price_list_repo.update_mapping(upload.id, predicted_mapping.model_dump())
+        await self._price_list_repo.update_status(upload.id, UploadStatus.mapping_predicted)
 
         return {
             "upload_id": str(upload.id),
@@ -99,7 +117,8 @@ class PriceListService:
     ) -> dict:
         """Подтвердить или отредактировать маппинг колонок.
 
-        Записывает подтверждённый маппинг в БД, меняет статус на `processing`.
+        Записывает подтверждённый маппинг в БД и переводит загрузку в `processing`:
+        дальше админ-эндпоинт ставит в очередь Celery-таску векторизации каталога.
         """
         import uuid as _uuid
 
@@ -111,21 +130,26 @@ class PriceListService:
             "sku_column": payload.sku_column,
             "name_column": payload.name_column,
             "price_column": payload.price_column,
+            "unit_column": payload.unit_column,
             "additional_columns": payload.additional_columns,
         }
         await self._price_list_repo.update_mapping(upload.id, column_mapping)
-        await self._price_list_repo.update_status(upload.id, "processing")
+        await self._price_list_repo.update_status(upload.id, UploadStatus.processing)
 
         return {
             "upload_id": str(upload.id),
-            "status": "processing",
+            "status": UploadStatus.processing.value,
             "mapping": column_mapping,
         }
 
-    async def _parse_pricelist(self, file_key: str, column_mapping: dict) -> list[dict]:
+    async def commit_upload(self) -> None:
+        """Зафиксировать загрузку до постановки таски: воркер должен увидеть запись."""
+        await self._price_list_repo.commit()
+
+    async def parse_pricelist(self, file_key: str, column_mapping: dict) -> list[dict]:
         """Прочитать прайс-лист из MinIO и вернуть список строк по маппингу.
 
-        Возвращает список dict с ключами: sku, name, price (если есть), description.
+        Возвращает список dict с ключами: sku, name, unit, price, description.
         """
         import io
 
@@ -139,24 +163,59 @@ class PriceListService:
         fileobj.seek(0)
 
         preview = self._excel_preview.read_preview(fileobj, max_rows=None)  # все строки
-        rows: list[dict] = []
-        sku_idx = preview["headers"].index(column_mapping["sku_column"])
-        name_idx = preview["headers"].index(column_mapping["name_column"])
-        price_idx = None
-        if column_mapping.get("price_column"):
-            try:
-                price_idx = preview["headers"].index(column_mapping["price_column"])
-            except ValueError:
-                pass
+        headers = preview["headers"]
 
+        def index_of(column_name: str | None) -> int | None:
+            """Номер колонки в листе по её имени из маппинга (None, если колонки нет)."""
+            if not column_name:
+                return None
+            try:
+                return headers.index(column_name)
+            except ValueError:
+                return None
+
+        sku_idx = index_of(column_mapping.get("sku_column"))
+        name_idx = index_of(column_mapping.get("name_column"))
+        price_idx = index_of(column_mapping.get("price_column"))
+        unit_idx = index_of(column_mapping.get("unit_column"))
+
+        def value(row: list, idx: int | None) -> object | None:
+            """Значение ячейки строки по номеру колонки (None, если колонки нет)."""
+            return row[idx] if idx is not None and idx < len(row) else None
+
+        rows: list[dict] = []
         for row in preview["rows"]:
-            sku = str(row[sku_idx]) if sku_idx < len(row) else ""
-            name = str(row[name_idx]) if name_idx < len(row) else ""
-            price = row[price_idx] if price_idx is not None and price_idx < len(row) else None
+            sku = str(value(row, sku_idx) or "").strip()
+            name = str(value(row, name_idx) or "").strip()
+            if not name:
+                continue  # Строки без наименования в каталог не попадают
             description = f"{sku} {name}" if sku else name
-            rows.append({"sku": sku, "name": name, "price": price, "description": description})
+            rows.append(
+                {
+                    "sku": sku,
+                    "name": name,
+                    "unit": (str(value(row, unit_idx)).strip() if value(row, unit_idx) is not None else None),
+                    "price": self._to_float(value(row, price_idx)),
+                    "description": description,
+                }
+            )
 
         return rows
+
+    @staticmethod
+    def _to_float(raw: object | None) -> float | None:
+        """Цена из ячейки Excel → float (пустое, текст без чисел → None)."""
+        if raw is None or isinstance(raw, bool):
+            return None
+        if isinstance(raw, int | float):
+            return float(raw)
+        text = str(raw).replace("\u00a0", " ").replace(" ", "").replace(",", ".").strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
 
     # Сколько строк данных передавать LLM как образцы содержимого колонок
     SAMPLE_ROWS_FOR_LLM = 5

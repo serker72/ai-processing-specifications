@@ -1,5 +1,7 @@
 """Pydantic-схемы для предсказания маппинга колонок спецификации (Модуль 5)."""
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -30,3 +32,65 @@ class SpecificationMappingPrediction(BaseModel):
             price_column=response.get("price_column"),
             additional_columns=additional,
         )
+
+
+class SpecificationUploadItem(BaseModel):
+    """Элемент списка ранее загруженных спецификаций."""
+
+    id: str = Field(..., description="Идентификатор сессии загрузки")
+    filename: str = Field(..., description="Имя исходного Excel-файла")
+    status: str = Field(..., description="Статус обработки файла")
+    created_at: datetime = Field(..., description="Время загрузки")
+
+
+class SpecificationUploadListResponse(BaseModel):
+    """Ответ со списком загрузок спецификаций менеджера."""
+
+    uploads: list[SpecificationUploadItem]
+
+
+class SpecificationUploadDetail(BaseModel):
+    """Карточка спецификации: файл, стадия обработки, маппинг, сводка по строкам."""
+
+    id: str = Field(..., description="Идентификатор сессии загрузки")
+    filename: str = Field(..., description="Имя исходного Excel-файла")
+    status: str = Field(..., description="Статус обработки файла (UploadStatus)")
+    created_at: datetime = Field(..., description="Время загрузки")
+    column_mapping: dict | None = Field(None, description="Подтверждённый маппинг колонок")
+    rows_total: int = Field(..., description="Всего строк в загрузке")
+    rows_by_status: dict[str, int] = Field(
+        default_factory=dict, description="Счётчик строк по статусам RowStatus"
+    )
+
+
+class MatchedCatalogItem(BaseModel):
+    """Позиция каталога, сопоставленная строке спецификации."""
+
+    id: str = Field(..., description="Идентификатор позиции каталога")
+    sku: str = Field(..., description="Артикул (SKU)")
+    name: str = Field(..., description="Наименование позиции")
+    unit: str | None = Field(None, description="Единица измерения")
+    price: float | None = Field(None, description="Цена за единицу")
+
+
+class SpecificationRowItem(BaseModel):
+    """Строка спецификации с результатом матчинга."""
+
+    id: str = Field(..., description="Идентификатор строки")
+    row_number: int = Field(..., description="Порядковый номер строки в файле")
+    raw_name: str = Field(..., description="Наименование из файла клиента")
+    quantity: float | None = Field(None, description="Количество из файла клиента")
+    unit: str | None = Field(None, description="Единица измерения из файла клиента")
+    price: float | None = Field(None, description="Цена из файла клиента (если была)")
+    match_type: str | None = Field(None, description="Тип матчинга: auto / top_n / unmatched")
+    status: str = Field(..., description="Статус строки (RowStatus)")
+    matched_item: MatchedCatalogItem | None = Field(None, description="Сопоставленная позиция каталога")
+
+
+class SpecificationRowListResponse(BaseModel):
+    """Ответ со страницей строк спецификации."""
+
+    rows: list[SpecificationRowItem]
+    total: int = Field(..., description="Всего строк с учётом фильтра")
+    page: int = Field(..., description="Номер страницы")
+    page_size: int = Field(..., description="Размер страницы")

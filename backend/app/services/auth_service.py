@@ -8,6 +8,7 @@ from fastapi import HTTPException, Response, status
 from app.core.config import Settings
 from app.core.messages import AuthMessages
 from app.models.models import User
+from app.repositories.device_repository import DeviceRepository
 from app.repositories.session_repository import SessionRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.auth import LoginRequest, TokenPair
@@ -31,18 +32,32 @@ class AuthService:
         session_repository: SessionRepository,
         security_service: SecurityService,
         settings: Settings,
+        device_repository: DeviceRepository,
     ) -> None:
         self._user_repository = user_repository
         self._session_repository = session_repository
         self._security = security_service
         self._jwt_settings = settings.jwt
+        self._device_repository = device_repository
 
     async def login(self, payload: LoginRequest, response: Response) -> None:
         """Аутентифицировать пользователя, создать сессию и выставить токены в куки."""
         user = await self._authenticate(payload.email, payload.password)
+        fingerprint_hash = self._security.hash_fingerprint(payload.fingerprint)
+        await self._check_device_allowed(fingerprint_hash)
         token_pair = self._security.create_token_pair(str(user.id), payload.fingerprint)
-        await self._save_session(str(user.id), payload.fingerprint, token_pair)
+        await self._save_session(str(user.id), fingerprint_hash, token_pair)
+        # Реестр устройств: первый вход создаёт запись, дальше — отметка времени
+        await self._device_repository.touch(fingerprint_hash)
         self._set_token_cookies(response, token_pair)
+
+    async def _check_device_allowed(self, fingerprint_hash: str) -> None:
+        """Отказать во входе, если устройство заблокировано администратором."""
+        device = await self._device_repository.get_by_fingerprint_hash(fingerprint_hash)
+        if device is not None and device.blocked:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail=AuthMessages.DEVICE_BLOCKED
+            )
 
     async def refresh(self, access_token: str, refresh_token: str, fingerprint: str, response: Response) -> None:
         """Обновить пару токенов с ротацией: старые jti — в blacklist, сессия — перезаписана.
@@ -105,9 +120,8 @@ class AuthService:
             )
         return user
 
-    async def _save_session(self, user_id: str, fingerprint: str, token_pair: TokenPair) -> None:
+    async def _save_session(self, user_id: str, fingerprint_hash: str, token_pair: TokenPair) -> None:
         """Сохранить refresh-токен в Redis по ключу session:{user_id}:{fp_hash}."""
-        fingerprint_hash = self._security.hash_fingerprint(fingerprint)
         await self._session_repository.save_session(
             user_id,
             fingerprint_hash,

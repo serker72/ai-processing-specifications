@@ -7,9 +7,17 @@ import uuid
 from typing import Any
 
 from app.core.messages import CommonMessages
+from app.models.models import UploadStatus
 from app.repositories.specification_repository import SpecificationRepository
-from app.schemas.specification import SpecificationMappingPrediction
+from app.schemas.specification import (
+    MatchedCatalogItem,
+    SpecificationMappingPrediction,
+    SpecificationRowItem,
+    SpecificationUploadDetail,
+    SpecificationUploadItem,
+)
 from app.services.excel_preview_service import ExcelPreviewService
+from app.services.file_naming import StoredFileKey
 from app.services.llm_service import LlmService
 from app.services.minio_service import MinioService
 
@@ -70,7 +78,7 @@ class SpecificationService:
         # 3. Предсказать маппинг через LLM
         predicted_mapping = await self._predict_column_mapping(preview["headers"])
 
-        # 4. Сохранить запись в БД
+        # 4. Сохранить запись в БД: маппинг + статус предсказанного маппинга
         upload = await self._spec_repo.create(
             manager_id=manager_id,
             file_key=file_key,
@@ -78,6 +86,7 @@ class SpecificationService:
         await self._spec_repo.update_mapping(
             upload.id, predicted_mapping.model_dump()
         )
+        await self._spec_repo.update_status(upload.id, UploadStatus.mapping_predicted)
 
         return {
             "upload_id": str(upload.id),
@@ -86,6 +95,113 @@ class SpecificationService:
             "preview": preview,
             "predicted_mapping": predicted_mapping.model_dump(),
         }
+
+    async def list_uploads(self, manager_id: uuid.UUID) -> list[SpecificationUploadItem]:
+        """Список ранее загруженных спецификаций менеджера (свежие — первыми)."""
+        uploads = await self._spec_repo.list_by_manager(manager_id)
+        return [
+            SpecificationUploadItem(
+                id=str(upload.id),
+                filename=StoredFileKey.original_name(upload.file_key),
+                status=upload.status.value,
+                created_at=upload.created_at,
+            )
+            for upload in uploads
+        ]
+
+    async def get_upload(self, upload_id: uuid.UUID, manager_id: uuid.UUID) -> SpecificationUploadDetail:
+        """Карточка спецификации: файл, статус, маппинг, сводка по строкам.
+
+        Raises:
+            LookupError: загрузка не найдена либо принадлежит другому менеджеру.
+        """
+        upload = await self._spec_repo.get_for_manager(upload_id, manager_id)
+        if upload is None:
+            raise LookupError(CommonMessages.NOT_FOUND)
+
+        return SpecificationUploadDetail(
+            id=str(upload.id),
+            filename=StoredFileKey.original_name(upload.file_key),
+            status=upload.status.value,
+            created_at=upload.created_at,
+            column_mapping=upload.column_mapping,
+            rows_total=await self._spec_repo.count_rows(upload.id),
+            rows_by_status=await self._spec_repo.count_rows_by_status(upload.id),
+        )
+
+    async def list_rows(
+        self,
+        upload_id: uuid.UUID,
+        manager_id: uuid.UUID,
+        status: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> tuple[list[SpecificationRowItem], int]:
+        """Страница строк спецификации с результатом матчинга.
+
+        Returns:
+            (строки страницы, общее число строк с учётом фильтра).
+
+        Raises:
+            LookupError: загрузка не найдена либо принадлежит другому менеджеру.
+        """
+        upload = await self._spec_repo.get_for_manager(upload_id, manager_id)
+        if upload is None:
+            raise LookupError(CommonMessages.NOT_FOUND)
+
+        rows = await self._spec_repo.list_rows(
+            upload_id=upload.id,
+            status=status,
+            offset=(page - 1) * page_size,
+            limit=page_size,
+        )
+        total = await self._spec_repo.count_rows(upload.id, status)
+
+        items = []
+        for row in rows:
+            raw = row.raw_data or {}
+            item = row.matched_item
+            items.append(
+                SpecificationRowItem(
+                    id=str(row.id),
+                    row_number=row.row_number,
+                    raw_name=str(raw.get("raw_name") or ""),
+                    quantity=self._as_number(raw.get("quantity")),
+                    unit=raw.get("unit"),
+                    price=self._as_number(raw.get("price")),
+                    match_type=row.match_type.value if row.match_type else None,
+                    status=row.status.value if row.status else None,
+                    matched_item=(
+                        MatchedCatalogItem(
+                            id=str(item.id),
+                            sku=item.sku,
+                            name=item.name,
+                            unit=item.unit,
+                            price=item.price,
+                        )
+                        if item is not None
+                        else None
+                    ),
+                )
+            )
+        return items, total
+
+    async def commit_upload(self) -> None:
+        """Зафиксировать загрузку до постановки таски: воркер должен увидеть запись."""
+        await self._spec_repo.commit()
+
+    @staticmethod
+    def _as_number(raw: object) -> float | None:
+        """Значение числовой колонки из raw_data → float (текст без числа → None)."""
+        if raw is None or isinstance(raw, bool):
+            return None
+        if isinstance(raw, int | float):
+            return float(raw)
+        text = str(raw).replace("\u00a0", " ").replace(" ", "").replace(",", ".").strip()
+        try:
+            return float(text)
+        except ValueError:
+            return None
 
     async def _predict_column_mapping(
         self, headers: list[str]

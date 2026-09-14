@@ -11,6 +11,7 @@ class ConfirmMappingRequest(BaseModel):
     sku_column: str = Field(..., description="Имя колонки с артикулом/SKU")
     name_column: str = Field(..., description="Имя колонки с наименованием товара")
     price_column: str | None = Field(None, description="Имя колонки с ценой (если есть)")
+    unit_column: str | None = Field(None, description="Имя колонки с единицей измерения (если есть)")
     additional_columns: dict[str, str] = Field(default_factory=dict, description="Доп. колонки: {имя_колонки: роль}")
 
 
