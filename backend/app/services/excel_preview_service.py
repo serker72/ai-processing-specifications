@@ -54,3 +54,19 @@ class ExcelPreviewService:
             "rows": preview_rows,
             "total_rows": total_rows,
         }
+
+    @staticmethod
+    def read_headers(fileobj: Any) -> list[str]:
+        """Заголовки первого листа (первая строка) без чтения строк данных.
+
+        Нужен проверке маппинга при подтверждении: имена колонок сверяются с
+        файлом, а содержимое прайс-листа для этого не читаем.
+        """
+        fileobj.seek(0)
+        wb = load_workbook(filename=fileobj, read_only=True, data_only=True)
+        try:
+            for row in wb.active.iter_rows(max_row=1):
+                return [str(cell.value) if cell.value is not None else f"col_{j}" for j, cell in enumerate(row)]
+            return []
+        finally:
+            wb.close()

@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -43,14 +43,28 @@ class PriceListRepository:
         """
         await self._session.commit()
 
-    async def list_all(self) -> list[PriceListUpload]:
-        """Список загрузок прайс-листов (свежие — первыми) вместе с администратором."""
-        result = await self._session.execute(
+    async def list_filtered(self, status: UploadStatus | None = None) -> list[PriceListUpload]:
+        """Все загрузки, свежие первыми; с status — только этого статуса."""
+        stmt = (
             select(PriceListUpload)
             .options(selectinload(PriceListUpload.admin))
             .order_by(PriceListUpload.created_at.desc())
         )
+        if status is not None:
+            stmt = stmt.where(PriceListUpload.status == status)
+
+        result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def count_by_status(self) -> dict[str, int]:
+        """Сколько загрузок в каждом статусе (по всем загрузкам, без фильтра).
+
+        Пустые статусы здесь отсутствуют — нули подставляет сервис.
+        """
+        stmt = select(PriceListUpload.status, func.count()).group_by(PriceListUpload.status)
+
+        result = await self._session.execute(stmt)
+        return {status.value: total for status, total in result.all()}
 
     async def update_status(self, upload_id: UUID, status: UploadStatus) -> None:
         """Обновить статус обработки."""

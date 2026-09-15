@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, String, Text, func
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -107,7 +107,11 @@ class PriceListUpload(Base):
     """Сессия загрузки прайс-листа администратором."""
 
     __tablename__ = "price_list_uploads"
-    __table_args__ = ({"comment": "Сессии загрузки прайс-листов администратором"},)
+    __table_args__ = (
+        # История отдаётся фильтром по статусу и сортировкой по времени загрузки.
+        Index("ix_price_list_uploads_status_created_at", "status", text("created_at DESC")),
+        {"comment": "Сессии загрузки прайс-листов администратором"},
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, comment="Идентификатор сессии загрузки"

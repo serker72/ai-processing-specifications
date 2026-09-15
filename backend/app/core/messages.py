@@ -35,3 +35,13 @@ class UserMessages:
     """Сообщения управления пользователями (панель администратора)."""
 
     ROLE_SELF_CHANGE = "Нельзя изменить собственную роль"
+
+
+class PriceListMessages:
+    """Сообщения модуля прайс-листов."""
+
+    UPLOAD_NOT_FOUND = "Загрузка прайс-листа не найдена"
+
+    @staticmethod
+    def column_not_in_file(column: str) -> str:
+        return f"Колонка «{column}» не найдена в файле прайс-листа"

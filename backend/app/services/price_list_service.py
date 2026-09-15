@@ -3,7 +3,7 @@
 import uuid
 from typing import Any
 
-from app.core.messages import CommonMessages
+from app.core.messages import CommonMessages, PriceListMessages
 from app.models.models import UploadStatus
 from app.repositories.price_list_repository import PriceListRepository
 from app.schemas.confirm_mapping import ConfirmMappingRequest
@@ -39,10 +39,17 @@ class PriceListService:
         self._llm = llm
         self._price_list_repo = price_list_repo
 
-    async def list_uploads(self) -> list[PriceListUploadItem]:
-        """История загрузок прайс-листов (свежие — первыми)."""
-        uploads = await self._price_list_repo.list_all()
-        return [
+    async def list_uploads(
+        self, status: UploadStatus | None = None
+    ) -> tuple[list[PriceListUploadItem], dict[str, int]]:
+        """История загрузок прайс-листов (свежие — первыми) + счётчики по статусам.
+
+        Счётчики считаются по всем загрузкам, а не по отфильтрованным: иначе
+        выбранный статус обнулил бы счётчики остальных. Статусы без загрузок
+        возвращаются нулём, чтобы UI не дорисовывал пустые чипы сам.
+        """
+        uploads = await self._price_list_repo.list_filtered(status)
+        items = [
             PriceListUploadItem(
                 id=str(upload.id),
                 filename=StoredFileKey.original_name(upload.file_key),
@@ -52,6 +59,35 @@ class PriceListService:
             )
             for upload in uploads
         ]
+
+        counts = {upload_status.value: 0 for upload_status in UploadStatus}
+        counts.update(await self._price_list_repo.count_by_status())
+        return items, counts
+
+    async def get_preview(self, upload_id: str) -> dict[str, object]:
+        """Превью прайс-листа из MinIO (50 строк) + сохранённый маппинг из БД.
+
+        Для UI подтверждения маппинга: админ видит заголовки и строки файла
+        вместе с предсказанным/сохранённым маппингом. FileNotFoundError —
+        загрузки с таким ID нет.
+        """
+        upload = await self._price_list_repo.get_by_id(uuid.UUID(upload_id))
+        if not upload:
+            raise FileNotFoundError(PriceListMessages.UPLOAD_NOT_FOUND)
+
+        fileobj = await self._minio.download_fileobj(upload.file_key)
+        preview = self._excel_preview.read_preview(fileobj, max_rows=self._excel_preview.MAX_PREVIEW_ROWS)
+
+        return {
+            "upload_id": str(upload.id),
+            "filename": StoredFileKey.original_name(upload.file_key),
+            "status": upload.status.value,
+            "sheets": preview["sheets"],
+            "headers": preview["headers"],
+            "rows": preview["rows"],
+            "total_rows": preview["total_rows"],
+            "column_mapping": upload.column_mapping,
+        }
 
     async def upload_and_predict(
         self,

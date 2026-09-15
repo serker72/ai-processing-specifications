@@ -17,12 +17,12 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Upload
 from app.api.deps import get_current_admin
 from app.core.config import Settings
 from app.core.messages import CommonMessages
-from app.models.models import User
+from app.models.models import UploadStatus, User
 from app.repositories.session_repository import SessionRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.catalog import CatalogItemResponse, CatalogListResponse
 from app.schemas.confirm_mapping import ConfirmMappingRequest, ConfirmMappingResponse
-from app.schemas.price_list import PriceListListResponse
+from app.schemas.price_list import PriceListListResponse, PriceListPreviewResponse
 from app.schemas.proposal_template import (
     ProposalTemplateListResponse,
     ProposalTemplateResponse,
@@ -50,11 +50,50 @@ async def list_pricelists(
     session_repository: FromDishka[SessionRepository],
     user_repository: FromDishka[UserRepository],
     price_list_service: FromDishka[PriceListService],
+    status_filter: Annotated[
+        UploadStatus | None, Query(alias="status", description="Фильтр по статусу обработки")
+    ] = None,
 ) -> PriceListListResponse:
-    """Загрузки прайс-листов со статусами обработки (свежие — первыми)."""
+    """Загрузки прайс-листов со статусами обработки (свежие — первыми) и счётчиками статусов."""
     await get_current_admin(request, settings, security_service, session_repository, user_repository)
 
-    return PriceListListResponse(uploads=await price_list_service.list_uploads())
+    uploads, counts = await price_list_service.list_uploads(status_filter)
+    return PriceListListResponse(uploads=uploads, counts=counts)
+
+
+@admin_router.get(
+    "/pricelists/{upload_id}/preview",
+    response_model=PriceListPreviewResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Превью прайс-листа и сохранённый маппинг колонок",
+)
+async def preview_pricelist(
+    upload_id: str,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    price_list_service: FromDishka[PriceListService],
+) -> PriceListPreviewResponse:
+    """Файл из MinIO (первые 50 строк) и сохранённый column_mapping для подтверждения маппинга."""
+    await get_current_admin(request, settings, security_service, session_repository, user_repository)
+
+    try:
+        result = await price_list_service.get_preview(upload_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=CommonMessages.VALIDATION_ERROR) from e
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+    return PriceListPreviewResponse(**result)
 
 
 @admin_router.get(
