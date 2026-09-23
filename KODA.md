@@ -2,6 +2,8 @@
 
 Инструкционный контекст для работы AI-ассистента с этим монорепозиторием.
 
+> Краткие правила для контрибьюторов и AI-агентов (структура, сборка, стиль, коммиты) — в [`AGENTS.md`](AGENTS.md). Этот файл — подробный контекст; при правке правил обновлять оба.
+
 ## Структура монорепозитория
 
 ```
@@ -17,6 +19,7 @@ ai-processing-specifications/
 ├── docker-compose.yml    # postgres (pgvector), pgbouncer, redis, minio, backend, worker, frontend, nginx
 ├── .env / .env.example   # Переменные окружения compose (example — шаблон)
 ├── README.md             # Назначение системы и Tier-модель матчинга
+├── AGENTS.md             # Краткие правила для контрибьюторов и AI-агентов
 └── KODA.md               # Этот файл
 ```
 
