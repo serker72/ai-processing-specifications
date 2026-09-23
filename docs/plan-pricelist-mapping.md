@@ -51,9 +51,11 @@ P0 закрыт: каталог наполняется (`vectorize_catalog` из
    превью 50 строк через `ExcelPreviewService`, исходное имя файла через
    `StoredFileKey.original_name`, `FileNotFoundError`/`ValueError` для эндпоинта) +
    эндпоинт в `admin.py` (400 для невалидного UUID, 404 если загрузки нет).
-3. **Backend: POST /api/v1/admin/pricelists/{upload_id}/confirm** — усилить: перед записью
-   маппинга прочитать заголовки файла из MinIO и проверить, что `sku_column`/`name_column`
-   существуют (400 при ошибке), 404 для несуществующей загрузки; далее как сейчас —
+3. ✅ **Backend: POST /api/v1/admin/pricelists/{upload_id}/confirm** — ГОТОВО:
+   перед записью маппинга читаются заголовки файла из MinIO
+   (`ExcelPreviewService.read_headers`), отсутствующая `sku_column`/`name_column`
+   → 400 (`PriceListMessages.column_not_in_file`), невалидный UUID → 400,
+   несуществующая загрузка → 404 (`UPLOAD_NOT_FOUND`); далее как раньше —
    `commit_upload()` + `vectorize_catalog.delay()`.
 4. ✅ **Backend: Pydantic-схема `PriceListPreviewResponse`** (sheets/headers/rows/total_rows/
    column_mapping/status) в `app/schemas/price_list.py` — УЖЕ БЫЛА в коде до шага 2
@@ -64,16 +66,20 @@ P0 закрыт: каталог наполняется (`vectorize_catalog` из
    `PriceListUpload.__table_args__` и в миграции (с `op.f(...)`), откат в downgrade.
    Применение — `docker compose exec backend alembic upgrade head` (после
    `docker compose build backend`: каталог `alembic/` копируется в образ).
-6. **Frontend: `app/utils/pricelist.ts`** — `MAPPING_ROLES` (sku/name/price/unit + доп.
-   колонки), `buildMappingPayload`, `countMappedColumns`.
-7. **Frontend: `app/pages/admin/pricelists.vue`** — фильтр по статусу, счётчики статусов,
-   кнопка «Маппинг» для строк в статусах `mapping_predicted` / `failed` (ссылка на
-   `/admin/pricelists/[uploadId]`).
-8. **Frontend: `app/pages/admin/pricelists/[uploadId].vue`** — таблица превью (заголовки +
-   строки) + редактор маппинга: каждой колонке роль или «не использовать», доп. колонки
-   свободной ролью; сохранить → `POST .../confirm` → редирект в историю.
-9. **Проверка**: `ruff check` + импорт `app.main`; `npm run build` во frontend;
-   smoke в docker compose: загрузка прайса → preview → confirm → история (статусы
+6. ✅ **Frontend: `app/utils/pricelist.ts`** — ГОТОВО: `MAPPING_ROLES` (sku/name/price/unit),
+   `ADDITIONAL_ROLE`, `assignmentsFromMapping`, `buildMappingPayload`, `countMappedColumns`,
+   `isMappingComplete`.
+7. ✅ **Frontend: `app/pages/admin/pricelists/index.vue`** — ГОТОВО (перенесена из
+   `pricelists.vue`): фильтр-чипы по статусу со счётчиками, кнопка «Маппинг» для строк в
+   статусах `mapping_predicted` / `failed` (ссылка на `/admin/pricelists/[uploadId]`).
+8. ✅ **Frontend: `app/pages/admin/pricelists/[uploadId].vue`** — ГОТОВО: редактор ролей
+   (колонка → роль / «не использовать» / доп. колонка со свободной ролью, примеры значений),
+   основная роль у одной колонки (повторное назначение снимает её с прежней), таблица превью
+   с подписями ролей; «Подтвердить маппинг» активна при назначенных SKU и наименовании и
+   только в статусах `mapping_predicted` / `failed` (иначе режим просмотра);
+   `POST .../confirm` → редирект в историю. Стили `.preview-scroll`, `.mapping-input`.
+9. **Проверка**: ✅ `ruff check` изменённых файлов; ✅ `npm run build` во frontend;
+   ⏳ smoke в docker compose: загрузка прайса → preview → confirm → история (статусы
    processing→completed) → позиции в `/admin/catalog`; загрузка спецификации менеджером →
    строки в `/manager/uploads`.
 
@@ -163,9 +169,9 @@ P0 закрыт: каталог наполняется (`vectorize_catalog` из
 2. **Редактирование каталога (админ).** Сейчас `GET /admin/catalog` read-only:
    `PATCH /api/v1/admin/catalog/{item_id}` (price, unit, name) + форма на
    `pages/admin/catalog.vue`. Правки цены не пересоздают эмбеддинг (он по наименованию).
-3. **UI шаблонов КП: редактирование.** `PATCH /admin/proposal-templates/{id}` уже
-   реализован на backend — подключить инлайн-правку названия/даты на
-   `pages/admin/proposal-templates.vue` (кнопка `btn-edit` есть, обработчика нет).
+3. ✅ **UI шаблонов КП: редактирование.** УЖЕ РЕАЛИЗОВАНО в `11085e3`: инлайн-правка
+   (`startEdit`/`saveTemplate`) → `PATCH /admin/proposal-templates/{id}` на
+   `pages/admin/proposal-templates.vue`.
 4. **Повторная обработка упавших загрузок.** Кнопка «Повторить» для `failed` в истории
    прайсов и спецификаций: `POST .../pricelists/{id}/retry` и `.../specifications/{id}/retry`
    (пере-постановка таски с существующим `column_mapping`).
