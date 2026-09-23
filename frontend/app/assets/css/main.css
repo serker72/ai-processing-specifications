@@ -508,3 +508,80 @@ code {
   color: var(--app-warning-fg);
   font-size: 13px;
 }
+
+/* Фильтр-чипы по статусу в истории загрузок прайс-листов. */
+.status-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.filter-chip {
+  padding: 5px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: var(--app-surface);
+  color: var(--app-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.filter-chip:hover:not(:disabled) {
+  background: var(--app-surface-muted);
+  color: var(--app-text);
+}
+
+.filter-chip.active {
+  background: var(--app-accent);
+  border-color: var(--app-accent);
+  color: var(--app-on-accent);
+}
+
+.filter-chip:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Ячейка действий в таблице истории (кнопка «Маппинг»). */
+.table-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* NuxtLink «Маппинг» — якорь, оформленный как btn-action. */
+a.btn-mapping {
+  display: inline-block;
+  padding: 5px 12px;
+  border-radius: 6px;
+  background: var(--app-accent);
+  color: var(--app-on-accent);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+a.btn-mapping:hover {
+  filter: brightness(0.94);
+}
+
+/* Широкие таблицы превью прайс-листа: горизонтальная прокрутка внутри карточки. */
+.preview-scroll {
+  overflow-x: auto;
+}
+
+/* Поле свободной роли доп. колонки в редакторе маппинга. */
+.mapping-input {
+  width: 100%;
+  min-width: 140px;
+  padding: 6px 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.mapping-input:focus {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 1px;
+}
