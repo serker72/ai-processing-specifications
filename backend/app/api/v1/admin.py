@@ -189,8 +189,10 @@ async def confirm_pricelist_mapping(
             payload=payload,
             admin_id=admin.id,
         )
-    except FileNotFoundError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=CommonMessages.NOT_FOUND)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
     except HTTPException:
         raise
     except Exception as e:

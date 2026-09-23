@@ -153,14 +153,22 @@ class PriceListService:
     ) -> dict:
         """Подтвердить или отредактировать маппинг колонок.
 
-        Записывает подтверждённый маппинг в БД и переводит загрузку в `processing`:
-        дальше админ-эндпоинт ставит в очередь Celery-таску векторизации каталога.
-        """
-        import uuid as _uuid
+        Перед записью сверяет обязательные колонки (`sku_column`, `name_column`)
+        с заголовками файла из MinIO — иначе векторизация молча обработает прайс
+        без наименований. Записывает подтверждённый маппинг в БД и переводит
+        загрузку в `processing`: дальше админ-эндпоинт ставит в очередь
+        Celery-таску векторизации каталога.
 
-        upload = await self._price_list_repo.get_by_id(_uuid.UUID(upload_id))
+        FileNotFoundError — загрузки нет, ValueError — колонки нет в файле.
+        """
+        upload = await self._price_list_repo.get_by_id(uuid.UUID(upload_id))
         if not upload:
-            raise FileNotFoundError(f"Загрузка {upload_id} не найдена")
+            raise FileNotFoundError(PriceListMessages.UPLOAD_NOT_FOUND)
+
+        headers = self._excel_preview.read_headers(await self._minio.download_fileobj(upload.file_key))
+        for column in (payload.sku_column, payload.name_column):
+            if column not in headers:
+                raise ValueError(PriceListMessages.column_not_in_file(column))
 
         column_mapping = {
             "sku_column": payload.sku_column,
