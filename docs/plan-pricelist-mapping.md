@@ -7,6 +7,23 @@
 > Файл содержит три плана: текущий (UI подтверждения маппинга прайс-листов),
 > P1 (надёжность realtime и рабочее место менеджера) и P2 (экспорт КП и эксплуатация).
 
+## Статус выполнения (сверка с кодом 2026-09-23)
+
+- **P0 (UI маппинга прайс-листов)** — шаги 1–8 ✅, коммиты `b1c9849` (Backend, confirm),
+  `a6fe719` (Frontend: история + `pricelists/[uploadId].vue`), `8e367b3` (Docs).
+  `ruff check` и `npm run build` проходят. Остался ⏳ шаг 9 — smoke в docker compose
+  (нужны `docker compose build backend frontend`, `alembic upgrade head` для `b7d41f2a9c33`,
+  запущенная Ollama, тестовый `.xlsx`).
+- **P1** — не начат; все дефекты из раздела «Контекст» подтверждены по коду: нет буфера
+  SSE (`LPUSH/LTRIM/LRANGE`), нет `PATCH .../rows/{row_id}` и `GET .../matches`, голый
+  `new EventSource` в `manager/specifications.vue`, дефолтные `JWT_SECRET_KEY` /
+  `JWT_COOKIE_SECURE=False` без валидации, каталога `backend/tests/` нет.
+- **P2** — шаг 3 ✅ (сделан ранее в `11085e3`); шаг 5 частично (`/api/v1/health` есть,
+  healthcheck backend/worker в compose нет); шаги 1, 2, 4, 6, 7 — не начаты.
+  Для шага 1: `weasyprint` в `pyproject.toml` есть, **`jinja2` нет** — добавить.
+- **Расхождение в документации:** `KODA.md` указывает `GET /health`, фактический маршрут —
+  `/api/v1/health` (`main.py`, `api_prefix + "/health"`); исправить при ближайшей правке.
+
 ## Контекст
 
 P0 закрыт: каталог наполняется (`vectorize_catalog` из confirm + UPSERT по `(sku,name)`),
