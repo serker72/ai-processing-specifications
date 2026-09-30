@@ -7,13 +7,15 @@
 > Файл содержит три плана: текущий (UI подтверждения маппинга прайс-листов),
 > P1 (надёжность realtime и рабочее место менеджера) и P2 (экспорт КП и эксплуатация).
 
-## Статус выполнения (сверка с кодом 2026-09-23)
+## Статус выполнения (сверка с кодом 2026-09-30)
 
-- **P0 (UI маппинга прайс-листов)** — шаги 1–8 ✅, коммиты `b1c9849` (Backend, confirm),
-  `a6fe719` (Frontend: история + `pricelists/[uploadId].vue`), `8e367b3` (Docs).
-  `ruff check` и `npm run build` проходят. Остался ⏳ шаг 9 — smoke в docker compose
-  (нужны `docker compose build backend frontend`, `alembic upgrade head` для `b7d41f2a9c33`,
-  запущенная Ollama, тестовый `.xlsx`).
+- **P0 (UI маппинга прайс-листов)** — шаги 1–9 ✅ ПОЛНОСТЬЮ. Шаг 9 (smoke в docker
+  compose) пройден 2026-09-30: прайс-лист (10 позиций) загружен → LLM-маппинг →
+  confirm → worker `catalog.vectorize` → статус `completed` → позиции SKU001–SKU010
+  появились в `/admin/catalog`; спецификация (6 строк) загружена менеджером →
+  worker `specification.process` → статус `completed` → все 6 строк `matched` в
+  `/manager/specifications/{id}/rows`. При smoke найден и исправлен дефект
+  `MinioService` (см. «Дефекты, найденные при smoke»).
 - **P1** — не начат; все дефекты из раздела «Контекст» подтверждены по коду: нет буфера
   SSE (`LPUSH/LTRIM/LRANGE`), нет `PATCH .../rows/{row_id}` и `GET .../matches`, голый
   `new EventSource` в `manager/specifications.vue`, дефолтные `JWT_SECRET_KEY` /
@@ -96,9 +98,22 @@ P0 закрыт: каталог наполняется (`vectorize_catalog` из
    только в статусах `mapping_predicted` / `failed` (иначе режим просмотра);
    `POST .../confirm` → редирект в историю. Стили `.preview-scroll`, `.mapping-input`.
 9. **Проверка**: ✅ `ruff check` изменённых файлов; ✅ `npm run build` во frontend;
-   ⏳ smoke в docker compose: загрузка прайса → preview → confirm → история (статусы
-   processing→completed) → позиции в `/admin/catalog`; загрузка спецификации менеджером →
-   строки в `/manager/uploads`.
+   ✅ smoke в docker compose пройден 2026-09-30: загрузка прайса (`.xlsx`, 10 строк) →
+   preview → confirm → история (статусы mapping_predicted→processing→completed) →
+   позиции SKU001–SKU010 в `/admin/catalog`; загрузка спецификации менеджером (6 строк) →
+   worker → статус completed → 6 строк `matched` в `/manager/specifications/{id}/rows`.
+
+## Дефекты, найденные при smoke (исправлены 2026-09-30)
+
+- **`MinioService` переиспользовал клиент между event loop воркера.** Celery-таска
+  (`_run_async`) создаёт новый `asyncio` loop для каждой таски и закрывает его, а
+  `MinioService` — process-Singleton с ленивым aioboto3-клиентом: клиент, созданный в
+  loop первой таски (`catalog.vectorize`), переиспользовался во второй
+  (`specification.process`) и падал с `Event loop is closed` (aiohttp-коннектор
+  привязан к закрытому loop). Фикс: клиент переключается по `id(running_loop)` — при
+  смене loop старый клиент сбрасывается без `await` (loop мёртв) и создаётся новый
+  (`_client_loop` + `_reset_client` в `minio_service.py`). Требует пересборки
+  `docker compose build backend` и `--force-recreate worker`.
 
 ## Окружение / команды
 
