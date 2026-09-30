@@ -4,6 +4,7 @@
 Один экземпляр на процесс (Singleton), клиент создаётся лениво.
 """
 
+import asyncio
 import threading
 from typing import Any, ClassVar, Self
 from urllib.parse import quote
@@ -34,16 +35,35 @@ class MinioService:
         self._client: Any | None = None
         self._client_ctx: Any | None = None
         self._client_lock = threading.Lock()
+        # Привязка клиента к event loop: при смене loop (Celery: новая таска)
+        # клиент пересоздаётся, иначе aioboto3/aiohttp выбрасывает
+        # «Event loop is closed».
+        self._client_loop: int | None = None
+
+    def _reset_client(self) -> None:
+        """Сбросить привязку к старому loop (не awaits, loop может быть мёртв)."""
+        self._client = None
+        self._client_ctx = None
+        self._client_loop = None
 
     async def _get_client(self) -> Any:
         """Ленивая инициализация aioboto3-клиента.
 
         session.client() возвращает async context manager — входим в него один
-        раз и держим клиент открытым всё время жизни Singleton.
+        раз и держим клиент открытым всё время жизни Singleton. При смене event
+        loop (Celery создаёт новый loop для каждой таски) клиент пересоздаётся.
         """
-        if self._client is None:
+        current_loop = id(asyncio.get_running_loop())
+        if self._client is None or self._client_loop != current_loop:
             with self._client_lock:
-                if self._client is None:
+                # Повторная проверка после захвата локa — другой поток мог уже
+                # пересоздать клиент в текущем loop.
+                current_loop = id(asyncio.get_running_loop())
+                if self._client is None or self._client_loop != current_loop:
+                    # Старый клиент привязан к закрытому loop (Celery) — не
+                    # пытаемся его закрыть, просто сбрасываем ссылку.
+                    if self._client is not None:
+                        self._reset_client()
                     import aioboto3
 
                     session = aioboto3.Session(
@@ -55,6 +75,7 @@ class MinioService:
                         endpoint_url=f"http://{self._settings.minio.endpoint}",
                     )
                     self._client = await self._client_ctx.__aenter__()
+                    self._client_loop = current_loop
         return self._client
 
     async def create_bucket_if_not_exists(self) -> None:
