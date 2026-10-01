@@ -493,6 +493,95 @@ code {
   color: var(--app-warning-fg);
 }
 
+/* Статусы строк спецификации (RowStatus): matched — сопоставлена,
+   confirmed — подтверждена менеджером, excluded — исключена,
+   unmatched — не найдено в каталоге. */
+.status-badge.matched {
+  background: var(--app-info-bg);
+  color: var(--app-info-fg);
+}
+
+.status-badge.confirmed {
+  background: var(--app-success-bg);
+  color: var(--app-success-fg);
+}
+
+.status-badge.excluded {
+  background: var(--app-surface-muted);
+  color: var(--app-muted);
+}
+
+.status-badge.unmatched {
+  background: var(--app-danger-bg);
+  color: var(--app-danger-fg);
+}
+
+/* Сводка по строкам спецификации (счётчики по статусам в карточке). */
+.row-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+  font-size: 13px;
+  color: var(--app-muted);
+}
+
+/* Диалог выбора позиции каталога из кандидатов векторного поиска. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--app-bg) 60%, transparent);
+}
+
+.modal-card {
+  width: 100%;
+  max-width: 720px;
+  max-height: 80vh;
+  overflow-y: auto;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  padding: 20px;
+}
+
+.modal-card h3 {
+  margin-top: 0;
+}
+
+/* Кнопка «Подтвердить» в списке кандидатов (оформлена как btn-action). */
+a.btn-candidate,
+button.btn-candidate {
+  display: inline-block;
+  padding: 4px 10px;
+  border: none;
+  border-radius: 6px;
+  background: var(--app-accent);
+  color: var(--app-on-accent);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+button.btn-candidate:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Пагинация таблицы строк. */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  font-size: 13px;
+  color: var(--app-muted);
+}
+
 .empty-state {
   text-align: center;
   padding: 40px;

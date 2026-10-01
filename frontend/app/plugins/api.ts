@@ -91,6 +91,7 @@ export default defineNuxtPlugin((nuxtApp) => {
   return {
     provide: {
       api: $api,
+      authRefresh: refreshOnce,
     },
   }
 })

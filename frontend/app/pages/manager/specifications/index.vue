@@ -32,7 +32,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, onMounted } from 'vue'
+import { useSpecStream } from '~/composables/useSpecStream'
 import { useFingerprint } from '~/composables/useFingerprint'
 
 definePageMeta({ layout: 'workspace' })
@@ -46,7 +47,14 @@ const uploadResult = ref<any>(null)
 const error = ref('')
 const sseMessages = ref<string[]>([])
 
-let eventSource: EventSource | null = null
+// Устойчивый SSE: реконнект с backoff и refresh токена перед повторным подключением
+const { open: openStream } = useSpecStream({
+  onEvent(data) {
+    sseMessages.value.push(
+      `[${data.status}] ${data.message || data.raw_name || ''}`
+    )
+  },
+})
 
 // Проверяем авторизацию
 onMounted(async () => {
@@ -83,39 +91,12 @@ async function handleFileSelect(event: Event) {
 
     uploadResult.value = response
 
-    // Подписываемся на SSE-поток
-    subscribeToSSE(response.upload_id)
+    // Подписываемся на SSE-поток обработки загрузки
+    openStream(response.upload_id)
   } catch (err: any) {
     error.value = err?.data?.detail || 'Не удалось загрузить спецификацию'
   } finally {
     isUploading.value = false
   }
 }
-
-function subscribeToSSE(uploadId: string) {
-  const apiUrl = useRuntimeConfig().public.apiBase
-  const streamUrl = `${apiUrl}/manager/specifications/${uploadId}/stream`
-
-  eventSource = new EventSource(streamUrl)
-
-  eventSource.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data)
-      sseMessages.value.push(
-        `[${data.status}] ${data.message || data.raw_name || ''}`
-      )
-    } catch {
-      sseMessages.value.push(event.data)
-    }
-  }
-
-  eventSource.onerror = (error) => {
-    console.error('SSE Error:', error)
-    eventSource?.close()
-  }
-}
-
-onBeforeUnmount(() => {
-  eventSource?.close()
-})
 </script>

@@ -19,17 +19,26 @@
             <th>Файл</th>
             <th>Дата загрузки</th>
             <th>Статус</th>
-            <th>ID загрузки</th>
+            <th>Строки</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="upload in uploads" :key="upload.id">
-            <td>{{ upload.filename }}</td>
+            <td :title="upload.id">{{ upload.filename }}</td>
             <td>{{ formatDateTime(upload.created_at) }}</td>
             <td>
               <span :class="['status-badge', upload.status]">{{ statusLabel(upload.status) }}</span>
             </td>
-            <td class="mono">{{ upload.id }}</td>
+            <td class="table-actions">
+              <NuxtLink
+                v-if="upload.status === 'completed' || upload.status === 'failed'"
+                :to="`/manager/specifications/${upload.id}`"
+                class="btn-action btn-mapping"
+              >
+                Открыть
+              </NuxtLink>
+              <span v-else class="text-muted">—</span>
+            </td>
           </tr>
         </tbody>
       </table>
