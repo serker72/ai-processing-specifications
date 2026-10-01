@@ -16,10 +16,14 @@
   worker `specification.process` → статус `completed` → все 6 строк `matched` в
   `/manager/specifications/{id}/rows`. При smoke найден и исправлен дефект
   `MinioService` (см. «Дефекты, найденные при smoke»).
-- **P1** — не начат; все дефекты из раздела «Контекст» подтверждены по коду: нет буфера
-  SSE (`LPUSH/LTRIM/LRANGE`), нет `PATCH .../rows/{row_id}` и `GET .../matches`, голый
-  `new EventSource` в `manager/specifications.vue`, дефолтные `JWT_SECRET_KEY` /
-  `JWT_COOKIE_SECURE=False` без валидации, каталога `backend/tests/` нет.
+- **P1** — шаги 1–6 и 8 ✅ (реализованы 2026-10-01), шаг 7 (тесты) отложен по решению
+  команды («тестов пока нет»). Сделано: буфер SSE в Redis (`LPUSH/LTRIM`+TTL,
+  воспроизведение при подписке, дедупликация по `seq`); `PATCH .../rows/{row_id}` и
+  `GET .../matches`; рабочий стол `manager/specifications/[uploadId].vue`; устойчивый SSE
+  (`composables/useSpecStream.ts` с backoff + `$authRefresh`, применён и в
+  `specifications/index.vue`); fail-fast конфиг (`JWT_SECRET_KEY`/`JWT_COOKIE_SECURE` вне
+  `loc`, предупреждение о несовпадении CORS-домена). Проверка: `ruff check app/` и
+  `npm run build` — успешно; docker-compose smoke пройден 2026-10-01 (см. ниже).
 - **P2** — шаг 3 ✅ (сделан ранее в `11085e3`); шаг 5 частично (`/api/v1/health` есть,
   healthcheck backend/worker в compose нет); шаги 1, 2, 4, 6, 7 — не начаты.
   Для шага 1: `weasyprint` в `pyproject.toml` есть, **`jinja2` нет** — добавить.
@@ -114,6 +118,12 @@ P0 закрыт: каталог наполняется (`vectorize_catalog` из
   смене loop старый клиент сбрасывается без `await` (loop мёртв) и создаётся новый
   (`_client_loop` + `_reset_client` в `minio_service.py`). Требует пересборки
   `docker compose build backend` и `--force-recreate worker`.
+- **`Unclosed client session/connector` в логах воркера (исправлено 2026-10-01).** После
+  сброса старого MinIO-клиента при смене loop его aiohttp-сессия оставалась открытой, и
+  при `loop.close()` aiohttp писал предупреждение. Фикс: `MinioService.close()` /
+  `close_all()` закрывают aioboto3-контекст текущего loop, а `_run_async` в `tasks.py`
+  вызывает `close_all()` в `finally`, пока loop ещё жив. Код монтируется volume'ом —
+  достаточно `docker compose restart worker` (проверено: две подряд таски, лог чистый).
 
 ## Окружение / команды
 
@@ -154,35 +164,41 @@ P0 закрыт: каталог наполняется (`vectorize_catalog` из
 
 ## Шаги
 
-1. **Backend: надёжный SSE.** Буфер последних событий на загрузку в Redis
-   (`LIST spec:{id}:events`, `LPUSH`+`LTRIM`, TTL ~1 ч) в `RedisPubSub.publish`;
-   `GET .../stream` при подписке отдаёт буфер (`LRANGE`) до перехода на live-подписку.
-   Альтернатива (проще): переносить `process_specification.delay()` на момент после
-   первого подключения SSE — отвергнуто, обработка не должна зависеть от открытой вкладки.
-2. **Backend: действия над строками.** `PATCH /api/v1/manager/specifications/{upload_id}/rows/{row_id}`
-   — статус `confirmed`/`excluded` + (для confirmed) `catalog_item_id`; проверка владельца
-   через `get_for_manager`; подтверждение дополнительно пишет в `HistoricalMatch`
-   (Tier-1 словарь) — переиспользовать `MatchingService.confirm_match`.
-3. **Backend: варианты для строки.** `GET /api/v1/manager/specifications/{upload_id}/rows/{row_id}/matches`
-   — топ-N кандидатов векторного поиска по `raw_name` строки (для UI «выбрать из ТОП-N»).
-4. **Frontend: рабочий стол менеджера** `app/pages/manager/specifications/[uploadId].vue`:
-   таблица строк из `GET .../rows` с пагинацией, цветовое кодирование по `match_type`
-   (auto/top_n/unmatched), действия «Подтвердить» (выбор позиции из ТОП-N или совпавшей),
-   «Исключить» → PATCH из шага 2; сводка из `GET .../{upload_id}` (`rows_by_status`).
-   Виртуальный скролл при >500 строк (лёгкая собственная реализация, без новых зависимостей).
-5. **Frontend: устойчивый SSE.** Обёртка над EventSource: переподключение с backoff,
-   перед реконнектом `refreshOnce()` из `plugins/api.ts`; при `status=completed/error` —
-   закрытие потока и обновление списка/сводки.
-6. **Backend: fail-fast конфиг.** В `Settings` (или startup-hook `main.py`): запрет
-   дефолтного `JWT_SECRET_KEY` и `JWT_COOKIE_SECURE=False` при `environment != "loc"`;
-   предупреждение, если origin из `CORS_ORIGINS` не совпадает с доменом `BACKEND_BASE_URL`.
-7. **Тесты (pytest, backend/tests):** `ExcelPreviewService.read_preview`,
-   `PriceListService.parse_pricelist`/`_to_float`, `CatalogRepository.upsert_batch`
-   (ON CONFLICT), `SpecificationService._as_number`, tiers `MatchingService` (мок repo/embedder),
-   auth-поток (401/403, refresh-ротация) на httpx ASGI-транспорте с мок-Redis/MinIO.
-8. **Проверка:** ruff + pytest; docker compose smoke: upload спецификации → SSE-лог не
-   теряет первые строки (буфер) → подтверждение/исключение строк → повторная загрузка
-   того же наименования матчится Tier-1 (`auto`).
+1. ✅ **Backend: надёжный SSE.** ГОТОВО: `RedisPubSub.publish(..., buffered=True)` кладёт
+   событие в Redis LIST `{channel}:events` (`LPUSH`+`LTRIM` до 2000+`EXPIRE` 1 ч);
+   `buffered_events(channel)` отдаёт буфер в хронологическом порядке; `GET .../stream`
+   сначала подписывается, затем воспроизводит буфер, отсекая дубли по `seq`.
+2. ✅ **Backend: действия над строками.** ГОТОВО: `PATCH /api/v1/manager/specifications/{upload_id}/rows/{row_id}`
+   (`RowStatusUpdateRequest` → `SpecificationService.update_row_status`): статус
+   `confirmed`/`excluded`, для confirmed — `catalog_item_id` (или уже сопоставленная
+   позиция), проверка владельца `get_for_manager`, запись в `HistoricalMatch` через
+   `MatchingService.confirm_match`.
+3. ✅ **Backend: варианты для строки.** ГОТОВО: `GET .../rows/{row_id}/matches`
+   (`limit` 1–20) → `SpecificationService.get_row_matches` поверх `MatchingService.match_row`
+   (top-N кандидатов векторного поиска + текущая позиция).
+4. ✅ **Frontend: рабочий стол менеджера** `app/pages/manager/specifications/[uploadId].vue`:
+   таблица строк с пагинацией, цветовая кодировка `match_type`/`status`, диалог подтверждения
+   (текущая позиция или ТОП-N кандидатов), исключение через PATCH, сводка `rows_by_status`.
+   Виртуальный скролл не понадобился: пагинация по 50 строк.
+5. ✅ **Frontend: устойчивый SSE.** ГОТОВО: `app/composables/useSpecStream.ts` —
+   переподключение с экспоненциальным backoff (до 15 с), перед реконнектом `$authRefresh`
+   (экспортирован из `plugins/api.ts`), закрытие потока на `completed`/`error`,
+   дедупликация по `seq`. Применён в `specifications/[uploadId].vue` и
+   `specifications/index.vue` (голый `new EventSource` убран).
+6. ✅ **Backend: fail-fast конфиг.** ГОТОВО: `Settings._validate_safety` — вне
+   `PROJECT_ENVIRONMENT=loc` запрещает дефолтный `JWT_SECRET_KEY` и `JWT_COOKIE_SECURE=False`;
+   `_warn_cors_domain_mismatch` предупреждает, если ни один origin CORS не совпадает с
+   доменом `BACKEND_BASE_URL`. Сообщения — в `ConfigMessages`.
+7. ⏸ **Тесты (pytest, backend/tests)** — отложены по решению команды (тестов в проекте пока нет).
+8. ✅ **Проверка:** `ruff check app/` — чисто; `npm run build` — успешно. Docker-compose smoke
+   пройден 2026-10-01: каталог наполнен 3 позициями (SKU001–003, эмбеддинги e5), менеджер
+   загрузил спецификацию (3 строки) → обработка `completed` → **подключение к SSE уже после
+   завершения отдало все 5 событий буфера (seq 1–5), включая первые строки** (дефект потери
+   событий закрыт) → `GET .../matches` вернул кандидатов → `PATCH` подтвердил одну строку
+   (`confirmed`) и исключил другую (`excluded`), сводка `matched:1, confirmed:1, excluded:1` →
+   повторная загрузка того же файла дала `match_type=auto` (Tier-1) для подтверждённого
+   наименования. Логи воркера чистые: `Unclosed client session/connector` устранены
+   (см. «Дефекты, найденные при smoke»).
 
 # План P2: функциональное расширение и эксплуатация
 
