@@ -1,7 +1,16 @@
+import logging
 from functools import lru_cache
+from urllib.parse import urlparse
 
-from pydantic import Field, computed_field
+from pydantic import Field, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.messages import ConfigMessages
+
+logger = logging.getLogger(__name__)
+
+# Небезопасное значение по умолчанию: недопустимо вне локального окружения
+DEFAULT_JWT_SECRET = "change-me-in-production"
 
 
 class ProjectSettings(BaseSettings):
@@ -104,7 +113,7 @@ class JWTSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=(".env", "../.env"), env_prefix="JWT_", extra="ignore")
 
-    secret_key: str = "change-me-in-production"
+    secret_key: str = DEFAULT_JWT_SECRET
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
@@ -173,6 +182,34 @@ class Settings(BaseSettings):
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     llm: LlmSettings = Field(default_factory=LlmSettings)
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
+
+    @model_validator(mode="after")
+    def _validate_safety(self) -> "Settings":
+        """Fail-fast проверка небезопасных настроек вне локального окружения.
+
+        В prod (любое окружение кроме `loc`) приложение не должно стартовать с
+        дефолтным секретом JWT или с auth-куками без флага Secure. Несовпадение
+        домена CORS с BACKEND_BASE_URL не блокирует старт, но пишет предупреждение:
+        это риск, что браузер не сочтёт куки backend same-site.
+        """
+        environment = self.project.environment
+        if environment != "loc":
+            if self.jwt.secret_key == DEFAULT_JWT_SECRET:
+                raise ValueError(ConfigMessages.default_secret_in_non_loc(environment))
+            if not self.jwt.cookie_secure:
+                raise ValueError(ConfigMessages.insecure_cookies_in_non_loc(environment))
+
+        self._warn_cors_domain_mismatch()
+        return self
+
+    def _warn_cors_domain_mismatch(self) -> None:
+        """Предупредить, если ни один origin CORS не совпадает с доменом backend."""
+        domain = urlparse(self.backend.base_url).hostname
+        if not domain or not self.cors.origins:
+            return
+        origin_hosts = {urlparse(origin).hostname for origin in self.cors.origins}
+        if domain not in origin_hosts:
+            logger.warning(ConfigMessages.cors_domain_mismatch(self.cors.origins, domain))
 
 
 @lru_cache

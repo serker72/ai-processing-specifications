@@ -1,6 +1,7 @@
 """Pydantic-схемы для предсказания маппинга колонок спецификации (Модуль 5)."""
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -94,3 +95,33 @@ class SpecificationRowListResponse(BaseModel):
     total: int = Field(..., description="Всего строк с учётом фильтра")
     page: int = Field(..., description="Номер страницы")
     page_size: int = Field(..., description="Размер страницы")
+
+
+class RowStatusUpdateRequest(BaseModel):
+    """Смена статуса строки менеджером: подтвердить с позицией или исключить."""
+
+    status: Literal["confirmed", "excluded"] = Field(..., description="Новый статус строки (RowStatus)")
+    catalog_item_id: str | None = Field(
+        None, description="Позиция каталога для подтверждения (по умолчанию — уже сопоставленная)"
+    )
+
+
+class RowMatchCandidate(BaseModel):
+    """Кандидат из векторного поиска для выбора менеджером."""
+
+    id: str = Field(..., description="Идентификатор позиции каталога")
+    sku: str = Field(..., description="Артикул (SKU)")
+    name: str = Field(..., description="Наименование позиции")
+    unit: str | None = Field(None, description="Единица измерения")
+    price: float | None = Field(None, description="Цена за единицу")
+    similarity: float = Field(..., description="Косинусная схожесть с наименованием строки")
+
+
+class RowMatchesResponse(BaseModel):
+    """Топ-N кандидатов векторного поиска для строки спецификации."""
+
+    row_id: str = Field(..., description="Идентификатор строки")
+    raw_name: str = Field(..., description="Наименование строки из файла клиента")
+    match_type: str | None = Field(None, description="Текущий тип матчинга строки")
+    matched_item: MatchedCatalogItem | None = Field(None, description="Текущая сопоставленная позиция")
+    candidates: list[RowMatchCandidate] = Field(default_factory=list, description="Кандидаты, упорядоченные по схожести")

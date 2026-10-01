@@ -45,3 +45,37 @@ class PriceListMessages:
     @staticmethod
     def column_not_in_file(column: str) -> str:
         return f"Колонка «{column}» не найдена в файле прайс-листа"
+
+
+class SpecificationMessages:
+    """Сообщения модуля спецификаций."""
+
+    ROW_NOT_FOUND = "Строка спецификации не найдена"
+    ROW_STATUS_UNSUPPORTED = "Недопустимый статус строки"
+    CONFIRM_REQUIRES_ITEM = "Для подтверждения строки нужна позиция каталога"
+    CATALOG_ITEM_NOT_FOUND = "Позиция каталога не найдена"
+
+
+class ConfigMessages:
+    """Сообщения валидации конфигурации на старте приложения."""
+
+    @staticmethod
+    def default_secret_in_non_loc(environment: str) -> str:
+        return (
+            f"JWT_SECRET_KEY имеет небезопасное значение по умолчанию при "
+            f"PROJECT_ENVIRONMENT={environment!r}: задайте собственный секрет"
+        )
+
+    @staticmethod
+    def insecure_cookies_in_non_loc(environment: str) -> str:
+        return (
+            f"JWT_COOKIE_SECURE=False при PROJECT_ENVIRONMENT={environment!r}: "
+            f"auth-куки должны передаваться только по HTTPS"
+        )
+
+    @staticmethod
+    def cors_domain_mismatch(origins: list[str], domain: str) -> str:
+        return (
+            f"Ни один origin из CORS_ORIGINS не совпадает с доменом BACKEND_BASE_URL "
+            f"({domain}): {origins}. Проверьте same-site для auth-кук"
+        )

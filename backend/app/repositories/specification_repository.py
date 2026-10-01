@@ -6,7 +6,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.models import SpecificationRow, SpecificationUpload, UploadStatus
+from app.models.models import (
+    CatalogItem,
+    RowStatus,
+    SpecificationRow,
+    SpecificationUpload,
+    UploadStatus,
+)
 
 
 class SpecificationRepository:
@@ -120,6 +126,46 @@ class SpecificationRepository:
             (status.value if hasattr(status, "value") else str(status)): int(count)
             for status, count in result.all()
         }
+
+    async def get_row(self, upload_id: UUID, row_id: UUID) -> SpecificationRow | None:
+        """Строка спецификации, только если она принадлежит загрузке.
+
+        Чужая строка (из другой загрузки) возвращается как None — привязка
+        проверяется здесь, чтобы эндпоинт не раскрывал существование чужих строк.
+        """
+        result = await self._session.execute(
+            select(SpecificationRow)
+            .options(selectinload(SpecificationRow.matched_item))
+            .where(SpecificationRow.id == row_id, SpecificationRow.upload_id == upload_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_catalog_item(self, item_id: UUID) -> CatalogItem | None:
+        """Позиция каталога по ID (проверка существования перед подтверждением строки)."""
+        return await self._session.get(CatalogItem, item_id)
+
+    async def update_row_status(self, row_id: UUID, status: RowStatus) -> None:
+        """Изменить статус строки спецификации."""
+        row = await self._session.get(SpecificationRow, row_id)
+        if row:
+            row.status = status
+            await self._session.flush()
+
+    async def confirm_row(self, row_id: UUID, catalog_item_id: UUID) -> None:
+        """Подтвердить строку: статус confirmed и выбранная позиция каталога.
+
+        Тип матчинга (match_type) не меняется: подтверждение — действие
+        менеджера, а не результат Matching Engine, который отражает match_type.
+        """
+        row = await self._session.get(SpecificationRow, row_id)
+        if row:
+            row.status = RowStatus.confirmed
+            row.matched_item_id = catalog_item_id
+            await self._session.flush()
+
+    async def flush(self) -> None:
+        """Записать изменения в транзакцию (коммит — на уровне unit-of-work запроса)."""
+        await self._session.flush()
 
     async def update_mapping(self, upload_id: UUID, column_mapping: dict) -> None:
         """Сохранить маппинг колонок спецификации."""

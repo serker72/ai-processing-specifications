@@ -23,12 +23,13 @@ class MatchingService:
         self._matching_repo = matching_repo
         self._embedding_service = embedding_service
 
-    async def match_row(self, raw_name: str, sku: str | None = None) -> dict:
+    async def match_row(self, raw_name: str, sku: str | None = None, limit: int | None = None) -> dict:
         """Выполнить трёхуровневый матчинг строки спецификации.
 
         Args:
             raw_name: исходное наименование из строки спецификации.
             sku: артикул из строки спецификации (опционально, пока не используется).
+            limit: число кандидатов Tier 2 (по умолчанию TIER2_LIMIT).
 
         Returns:
             {
@@ -60,7 +61,7 @@ class MatchingService:
         embedding = self._embedding_service.embed_query(raw_name)
         candidates = await self._matching_repo.find_top_n(
             embedding,
-            limit=self.TIER2_LIMIT,
+            limit=limit or self.TIER2_LIMIT,
             min_score=self.TIER2_MIN_SCORE,
         )
 

@@ -8,11 +8,14 @@
 """
 
 import asyncio
+import logging
 from typing import Any
 from uuid import UUID
 
 from app.schemas.sse_events import ProgressEvent, RowMatchEvent
 from app.worker import celery_app
+
+logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 500  # Строк прайс-листа в одном батче векторизации
 BATCH_SIZE_SPEC = 100  # Строк спецификации в одном батче матчинга
@@ -27,6 +30,14 @@ def _run_async(coro_factory: Any) -> Any:
     try:
         return loop.run_until_complete(coro_factory())
     finally:
+        # Закрыть aioboto3-клиенты (MinioService — Singleton), пока loop ещё жив:
+        # после loop.close() aiohttp пишет «Unclosed client session/connector».
+        from app.services.minio_service import MinioService
+
+        try:
+            loop.run_until_complete(MinioService.close_all())
+        except Exception:
+            logger.warning("Не удалось закрыть MinIO-клиент после таски", exc_info=True)
         loop.close()
 
 
@@ -156,17 +167,29 @@ def process_specification(
         redis_pubsub = RedisPubSub()
         channel = f"spec_{upload_id}"
 
+        # Номер события: единая нумерация для буфера Redis и live-ленты,
+        # по нему SSE-подписчик отсекает дубликаты при пересечении воспроизведения
+        # буфера и подписки.
+        seq_counter = 0
+
+        def next_seq() -> int:
+            nonlocal seq_counter
+            seq_counter += 1
+            return seq_counter
+
         async def publish_progress(processed: int, total: int, status: str, message: str) -> None:
-            """Опубликовать событие прогресса в канал загрузки."""
+            """Опубликовать событие прогресса в канал загрузки (с кладкой в буфер)."""
             await redis_pubsub.publish(
                 channel,
                 ProgressEvent(
                     upload_id=upload_id,
+                    seq=next_seq(),
                     processed=processed,
                     total=total,
                     status=status,
                     message=message,
                 ).model_dump_json(),
+                buffered=True,
             )
 
         try:
@@ -270,6 +293,7 @@ def process_specification(
                                 channel,
                                 RowMatchEvent(
                                     upload_id=upload_id,
+                                    seq=next_seq(),
                                     row_number=row_num,
                                     raw_name=raw_name,
                                     matched_item_id=matched_id,
@@ -278,6 +302,7 @@ def process_specification(
                                     score=match_result["score"],
                                     message=f"Строка {row_num}: {tier}",
                                 ).model_dump_json(),
+                                buffered=True,
                             )
 
                         # Прогресс виден в UI до окончания обработки всего файла

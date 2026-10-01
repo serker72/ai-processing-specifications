@@ -46,6 +46,30 @@ class MinioService:
         self._client_ctx = None
         self._client_loop = None
 
+    async def close(self) -> None:
+        """Закрыть aioboto3-клиент текущего event loop.
+
+        Вызывается по завершении Celery-таски, пока loop ещё жив: без этого
+        aiohttp после `loop.close()` пишет «Unclosed client session/connector».
+        Если клиент принадлежит другому (уже закрытому) loop, закрыть его нельзя —
+        только сбрасываем ссылки.
+        """
+        if self._client is None or self._client_ctx is None:
+            self._reset_client()
+            return
+        if self._client_loop != id(asyncio.get_running_loop()):
+            self._reset_client()
+            return
+        ctx = self._client_ctx
+        self._reset_client()
+        await ctx.__aexit__(None, None, None)
+
+    @classmethod
+    async def close_all(cls) -> None:
+        """Закрыть клиенты всех Singleton-экземпляров (в текущем event loop)."""
+        for instance in list(cls._instances.values()):
+            await instance.close()
+
     async def _get_client(self) -> Any:
         """Ленивая инициализация aioboto3-клиента.
 

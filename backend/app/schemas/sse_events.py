@@ -7,6 +7,7 @@ class RowMatchEvent(BaseModel):
     """Событие обработки одной строки спецификации."""
 
     upload_id: str
+    seq: int | None = Field(None, description="Порядковый номер события (дедупликация буфера и live-ленты)")
     row_number: int
     raw_name: str
     matched_item_id: str | None = Field(None, description="Идентификатор найденного товара каталога")
@@ -20,6 +21,7 @@ class ProgressEvent(BaseModel):
     """Событие прогресса обработки спецификации."""
 
     upload_id: str
+    seq: int | None = Field(None, description="Порядковый номер события (дедупликация буфера и live-ленты)")
     processed: int
     total: int
     status: str = Field(..., description="pending / processing / completed / error")

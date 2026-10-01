@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import json
 from typing import Annotated
 from uuid import UUID
 
@@ -22,6 +23,9 @@ from app.repositories.user_repository import UserRepository
 from app.schemas.confirm_match import ConfirmMatchRequest, ConfirmMatchResponse
 from app.schemas.matching import MatchRequest, MatchResponse
 from app.schemas.specification import (
+    RowMatchesResponse,
+    RowStatusUpdateRequest,
+    SpecificationRowItem,
     SpecificationRowListResponse,
     SpecificationUploadDetail,
     SpecificationUploadListResponse,
@@ -40,6 +44,26 @@ def parse_upload_id(upload_id: str) -> UUID:
         return UUID(upload_id)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=CommonMessages.NOT_FOUND) from None
+
+
+def parse_row_id(row_id: str) -> UUID:
+    """UUID строки из пути маршрута; неверный формат — 404 (объекта с таким нет)."""
+    try:
+        return UUID(row_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=CommonMessages.NOT_FOUND) from None
+
+
+def _parse_optional_uuid(raw: str | None) -> UUID | None:
+    """Необязательный UUID из тела запроса; неверный формат — ошибка валидации (422)."""
+    if raw is None:
+        return None
+    try:
+        return UUID(raw)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=CommonMessages.VALIDATION_ERROR
+        ) from e
 
 
 @manager_router.post(
@@ -257,17 +281,43 @@ async def stream_specification_progress(
     redis_pubsub = RedisPubSub()
 
     async def event_generator():
-        """Генератор SSE-событий из Redis Pub/Sub."""
+        """Генератор SSE-событий: воспроизведение буфера Redis, затем live-подписка.
+
+        Подписка выполняется до чтения буфера, а события нумеруются полем `seq`:
+        так пересечение буфера и live-ленты не порождает дубликатов, и события,
+        опубликованные до подключения клиента, не теряются.
+        """
         pubsub = None
         try:
             pubsub = await redis_pubsub.subscribe(channel)
+
+            def take(raw: str) -> bool:
+                """Пропустить событие с seq <= последнего отправленного (дедупликация)."""
+                nonlocal last_seq
+                try:
+                    seq = json.loads(raw).get("seq")
+                except (ValueError, AttributeError):
+                    return True  # не наш JSON — отдаём как есть
+                if seq is None:
+                    return True
+                if seq <= last_seq:
+                    return False
+                last_seq = int(seq)
+                return True
+
+            last_seq = 0
+            for raw in await redis_pubsub.buffered_events(channel):
+                if take(raw):
+                    yield f"data: {raw}\n\n"
+
             while True:
                 if await request.is_disconnected():
                     break
                 message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
                 if message and message["type"] == "message":
                     data = message["data"]
-                    yield f"data: {data}\n\n"
+                    if take(data):
+                        yield f"data: {data}\n\n"
         except asyncio.CancelledError:
             pass
         finally:
@@ -325,6 +375,97 @@ async def upload_specification(
 
     except FileTooLargeError as e:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+    return result
+
+
+@manager_router.patch(
+    "/specifications/{upload_id}/rows/{row_id}",
+    response_model=SpecificationRowItem,
+    status_code=status.HTTP_200_OK,
+    summary="Изменить статус строки: подтвердить с позицией или исключить",
+)
+async def update_row_status(
+    upload_id: str,
+    row_id: str,
+    payload: RowStatusUpdateRequest,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    specification_service: FromDishka[SpecificationService],
+    matching_service: FromDishka[MatchingService],
+) -> SpecificationRowItem:
+    """Подтвердить строку с выбранной позицией каталога (Tier-1) или исключить."""
+    manager: User = await get_current_manager(
+        request, settings, security_service, session_repository, user_repository
+    )
+    try:
+        result = await specification_service.update_row_status(
+            upload_id=parse_upload_id(upload_id),
+            manager_id=manager.id,
+            row_id=parse_row_id(row_id),
+            status=payload.status,
+            catalog_item_id=_parse_optional_uuid(payload.catalog_item_id),
+            matching_service=matching_service,
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+    return result
+
+
+@manager_router.get(
+    "/specifications/{upload_id}/rows/{row_id}/matches",
+    response_model=RowMatchesResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Топ-N кандидатов векторного поиска для строки спецификации",
+)
+async def get_row_matches(
+    upload_id: str,
+    row_id: str,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    specification_service: FromDishka[SpecificationService],
+    matching_service: FromDishka[MatchingService],
+    limit: Annotated[
+        int, Query(ge=1, le=20, description="Число кандидатов (по умолчанию 5)")
+    ] = 5,
+) -> RowMatchesResponse:
+    """Возвращает текущую сопоставленную позицию и топ-N кандидатов векторного поиска."""
+    manager: User = await get_current_manager(
+        request, settings, security_service, session_repository, user_repository
+    )
+    try:
+        result = await specification_service.get_row_matches(
+            upload_id=parse_upload_id(upload_id),
+            manager_id=manager.id,
+            row_id=parse_row_id(row_id),
+            limit=limit,
+            matching_service=matching_service,
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
     except HTTPException:
         raise
     except Exception as e:
