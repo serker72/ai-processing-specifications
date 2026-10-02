@@ -20,7 +20,9 @@ from app.core.messages import CommonMessages
 from app.models.models import UploadStatus, User
 from app.repositories.session_repository import SessionRepository
 from app.repositories.user_repository import UserRepository
+from app.schemas.app_settings import AppSettingsResponse, AppSettingsUpdate
 from app.schemas.catalog import CatalogItemResponse, CatalogListResponse
+from app.schemas.client import ClientListResponse, ClientResponse, ClientUpdate
 from app.schemas.confirm_mapping import ConfirmMappingRequest, ConfirmMappingResponse
 from app.schemas.price_list import PriceListListResponse, PriceListPreviewResponse
 from app.schemas.proposal_template import (
@@ -28,13 +30,149 @@ from app.schemas.proposal_template import (
     ProposalTemplateResponse,
     ProposalTemplateUpdate,
 )
+from app.services.app_settings_service import AppSettingsService
 from app.services.catalog_service import CatalogService
+from app.services.client_service import (
+    ClientNotFoundError,
+    ClientService,
+)
 from app.services.price_list_service import FileTooLargeError, PriceListService
 from app.services.proposal_template_service import ProposalTemplateService
 from app.services.security import SecurityService
 from app.worker.tasks import vectorize_catalog
 
 admin_router = APIRouter(route_class=DishkaRoute, prefix="/admin", tags=["admin"])
+
+
+@admin_router.get(
+    "/settings",
+    response_model=AppSettingsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Системные настройки: реквизиты продавца и параметры НДС",
+)
+async def get_app_settings(
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    app_settings_service: FromDishka[AppSettingsService],
+) -> AppSettingsResponse:
+    """Текущие системные настройки (singleton-запись, создаётся при первом обращении)."""
+    await get_current_admin(request, settings, security_service, session_repository, user_repository)
+
+    try:
+        return await app_settings_service.get_settings()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+
+@admin_router.patch(
+    "/settings",
+    response_model=AppSettingsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Обновить системные настройки",
+)
+async def update_app_settings(
+    payload: AppSettingsUpdate,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    app_settings_service: FromDishka[AppSettingsService],
+) -> AppSettingsResponse:
+    """Частично обновить реквизиты продавца и параметры НДС."""
+    await get_current_admin(request, settings, security_service, session_repository, user_repository)
+
+    try:
+        return await app_settings_service.update_settings(payload)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+
+@admin_router.get(
+    "/clients",
+    response_model=ClientListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Список клиентов",
+)
+async def list_clients(
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    client_service: FromDishka[ClientService],
+    search: Annotated[str | None, Query(description="Подстрока в наименовании или ИНН")] = None,
+) -> ClientListResponse:
+    """Все клиенты системы."""
+    await get_current_admin(request, settings, security_service, session_repository, user_repository)
+
+    try:
+        clients = await client_service.list_clients(search=search)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+    return ClientListResponse(clients=clients)
+
+
+@admin_router.patch(
+    "/clients/{client_id}",
+    response_model=ClientResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Изменить клиента (администратор — любого)",
+)
+async def update_client(
+    client_id: str,
+    payload: ClientUpdate,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    client_service: FromDishka[ClientService],
+) -> ClientResponse:
+    """Обновить клиента; администратор может изменять любого клиента."""
+    admin: User = await get_current_admin(
+        request, settings, security_service, session_repository, user_repository
+    )
+
+    import uuid
+
+    try:
+        parsed_id = uuid.UUID(client_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=CommonMessages.NOT_FOUND) from None
+
+    try:
+        return await client_service.update_client(
+            parsed_id, payload, user_id=admin.id, is_admin=True
+        )
+    except ClientNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
 
 
 @admin_router.get(

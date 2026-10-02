@@ -56,6 +56,21 @@ class SpecificationMessages:
     CATALOG_ITEM_NOT_FOUND = "Позиция каталога не найдена"
 
 
+class ClientMessages:
+    """Сообщения модуля клиентов (покупателей)."""
+
+    NOT_FOUND = "Клиент не найден"
+    UPDATE_FORBIDDEN = "Можно изменять только созданных вами клиентов"
+
+
+class ProposalMessages:
+    """Сообщения модуля коммерческих предложений."""
+
+    SPECIFICATION_NOT_FOUND = "Спецификация не найдена"
+    NO_ROWS_TO_EXPORT = "Нет строк для формирования КП (нужны подтверждённые или сопоставленные строки)"
+    PROPOSAL_NOT_FOUND = "Коммерческое предложение не найдено"
+
+
 class ConfigMessages:
     """Сообщения валидации конфигурации на старте приложения."""
 

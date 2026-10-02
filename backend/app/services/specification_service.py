@@ -6,8 +6,9 @@
 import uuid
 from typing import Any
 
-from app.core.messages import CommonMessages, SpecificationMessages
+from app.core.messages import ClientMessages, CommonMessages, SpecificationMessages
 from app.models.models import RowStatus, UploadStatus
+from app.repositories.client_repository import ClientRepository
 from app.repositories.specification_repository import SpecificationRepository
 from app.schemas.specification import (
     MatchedCatalogItem,
@@ -42,17 +43,20 @@ class SpecificationService:
         excel_preview: ExcelPreviewService,
         llm: LlmService,
         specification_repo: SpecificationRepository,
+        client_repo: ClientRepository,
     ) -> None:
         self._minio = minio
         self._excel_preview = excel_preview
         self._llm = llm
         self._spec_repo = specification_repo
+        self._client_repo = client_repo
 
     async def upload_and_predict(
         self,
         fileobj: Any,
         original_filename: str,
         manager_id: object,
+        client_id: uuid.UUID,
     ) -> dict:
         """Загрузить спецификацию в MinIO, прочитать превью, предсказать маппинг.
 
@@ -66,6 +70,10 @@ class SpecificationService:
         fileobj.seek(0)
         if size > MAX_FILE_SIZE_BYTES:
             raise FileTooLargeError(CommonMessages.FILE_TOO_LARGE)
+
+        # 0.1 Проверить, что клиент существует
+        if await self._client_repo.get_by_id(client_id) is None:
+            raise ValueError(ClientMessages.NOT_FOUND)
 
         # 1. Сохранить файл в MinIO
         file_key = f"specifications/{uuid.uuid4().hex}-{original_filename}"
@@ -83,6 +91,7 @@ class SpecificationService:
         # 4. Сохранить запись в БД: маппинг + статус предсказанного маппинга
         upload = await self._spec_repo.create(
             manager_id=manager_id,
+            client_id=client_id,
             file_key=file_key,
         )
         await self._spec_repo.update_mapping(
@@ -107,6 +116,8 @@ class SpecificationService:
                 filename=StoredFileKey.original_name(upload.file_key),
                 status=upload.status.value,
                 created_at=upload.created_at,
+                client_id=str(upload.client_id),
+                client_name=upload.client.name if upload.client else None,
             )
             for upload in uploads
         ]
@@ -126,6 +137,8 @@ class SpecificationService:
             filename=StoredFileKey.original_name(upload.file_key),
             status=upload.status.value,
             created_at=upload.created_at,
+            client_id=str(upload.client_id),
+            client_name=upload.client.name if upload.client else None,
             column_mapping=upload.column_mapping,
             rows_total=await self._spec_repo.count_rows(upload.id),
             rows_by_status=await self._spec_repo.count_rows_by_status(upload.id),

@@ -11,16 +11,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings, get_settings
 from app.db.session import async_session_factory
+from app.repositories.app_settings_repository import AppSettingsRepository
 from app.repositories.catalog_repository import CatalogRepository
+from app.repositories.client_repository import ClientRepository
 from app.repositories.device_repository import DeviceRepository
 from app.repositories.matching_repository import MatchingRepository
 from app.repositories.price_list_repository import PriceListRepository
+from app.repositories.proposal_repository import ProposalRepository
 from app.repositories.proposal_template_repository import ProposalTemplateRepository
 from app.repositories.session_repository import SessionRepository
 from app.repositories.specification_repository import SpecificationRepository
 from app.repositories.user_repository import UserRepository
+from app.services.app_settings_service import AppSettingsService
 from app.services.auth_service import AuthService
 from app.services.catalog_service import CatalogService
+from app.services.client_service import ClientService
 from app.services.device_service import DeviceService
 from app.services.embedding_service import EmbeddingService
 from app.services.excel_preview_service import ExcelPreviewService
@@ -28,6 +33,7 @@ from app.services.llm_service import LlmService
 from app.services.matching_service import MatchingService
 from app.services.minio_service import MinioService
 from app.services.price_list_service import PriceListService
+from app.services.proposal_service import ProposalService
 from app.services.proposal_template_service import ProposalTemplateService
 from app.services.security import SecurityService
 from app.services.session_admin_service import SessionAdminService
@@ -79,6 +85,10 @@ class RepositoryProvider(Provider):
         return UserRepository(session)
 
     @provide
+    def provide_app_settings_repository(self, session: AsyncSession) -> AppSettingsRepository:
+        return AppSettingsRepository(session)
+
+    @provide
     def provide_session_repository(self, redis: Redis) -> SessionRepository:
         return SessionRepository(redis)
 
@@ -91,6 +101,10 @@ class RepositoryProvider(Provider):
         return CatalogRepository(session)
 
     @provide
+    def provide_client_repository(self, session: AsyncSession) -> ClientRepository:
+        return ClientRepository(session)
+
+    @provide
     def provide_price_list_repository(self, session: AsyncSession) -> PriceListRepository:
         return PriceListRepository(session)
 
@@ -101,6 +115,10 @@ class RepositoryProvider(Provider):
     @provide
     def provide_proposal_template_repository(self, session: AsyncSession) -> ProposalTemplateRepository:
         return ProposalTemplateRepository(session)
+
+    @provide
+    def provide_proposal_repository(self, session: AsyncSession) -> ProposalRepository:
+        return ProposalRepository(session)
 
 
 class MinioProvider(Provider):
@@ -179,6 +197,12 @@ class ServiceProvider(Provider):
         return UserService(user_repository)
 
     @provide
+    def provide_app_settings_service(
+        self, app_settings_repository: AppSettingsRepository
+    ) -> AppSettingsService:
+        return AppSettingsService(app_settings_repository)
+
+    @provide
     def provide_session_admin_service(
         self,
         session_repository: SessionRepository,
@@ -198,6 +222,10 @@ class ServiceProvider(Provider):
     @provide
     def provide_catalog_service(self, catalog_repository: CatalogRepository) -> CatalogService:
         return CatalogService(catalog_repository)
+
+    @provide
+    def provide_client_service(self, client_repository: ClientRepository) -> ClientService:
+        return ClientService(client_repository)
 
     @provide
     def provide_price_list_service(
@@ -228,12 +256,14 @@ class ServiceProvider(Provider):
         minio_service: MinioService,
         llm_service: LlmService,
         specification_repo: SpecificationRepository,
+        client_repo: ClientRepository,
     ) -> SpecificationService:
         return SpecificationService(
             minio_service,
             ExcelPreviewService(),
             llm_service,
             specification_repo,
+            client_repo,
         )
 
     @provide
@@ -243,3 +273,20 @@ class ServiceProvider(Provider):
         proposal_template_repo: ProposalTemplateRepository,
     ) -> ProposalTemplateService:
         return ProposalTemplateService(proposal_template_repo, minio_service)
+
+    @provide
+    def provide_proposal_service(
+        self,
+        proposal_repo: ProposalRepository,
+        specification_repo: SpecificationRepository,
+        app_settings_repository: AppSettingsRepository,
+        proposal_template_service: ProposalTemplateService,
+        minio_service: MinioService,
+    ) -> ProposalService:
+        return ProposalService(
+            proposal_repo,
+            specification_repo,
+            app_settings_repository,
+            proposal_template_service,
+            minio_service,
+        )

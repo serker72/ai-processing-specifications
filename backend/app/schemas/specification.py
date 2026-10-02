@@ -42,6 +42,8 @@ class SpecificationUploadItem(BaseModel):
     filename: str = Field(..., description="Имя исходного Excel-файла")
     status: str = Field(..., description="Статус обработки файла")
     created_at: datetime = Field(..., description="Время загрузки")
+    client_id: str = Field(..., description="Идентификатор клиента (покупателя)")
+    client_name: str | None = Field(None, description="Наименование клиента")
 
 
 class SpecificationUploadListResponse(BaseModel):
@@ -57,6 +59,8 @@ class SpecificationUploadDetail(BaseModel):
     filename: str = Field(..., description="Имя исходного Excel-файла")
     status: str = Field(..., description="Статус обработки файла (UploadStatus)")
     created_at: datetime = Field(..., description="Время загрузки")
+    client_id: str = Field(..., description="Идентификатор клиента (покупателя)")
+    client_name: str | None = Field(None, description="Наименование клиента")
     column_mapping: dict | None = Field(None, description="Подтверждённый маппинг колонок")
     rows_total: int = Field(..., description="Всего строк в загрузке")
     rows_by_status: dict[str, int] = Field(

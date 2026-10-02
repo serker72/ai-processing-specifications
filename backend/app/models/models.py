@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, String, Text, func, text
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, Numeric, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -143,6 +143,9 @@ class SpecificationUpload(Base):
     manager_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id"), comment="Идентификатор менеджера, загрузившего файл"
     )
+    client_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("clients.id"), comment="Идентификатор клиента (покупателя)"
+    )
     file_key: Mapped[str] = mapped_column(Text, comment="Ключ объекта файла в MinIO (S3)")
     column_mapping: Mapped[dict | None] = mapped_column(JSONB, comment="Маппинг колонок спецификации")
     status: Mapped[UploadStatus] = mapped_column(
@@ -153,6 +156,7 @@ class SpecificationUpload(Base):
     )
 
     manager: Mapped[User] = relationship()
+    client: Mapped["Client"] = relationship()
 
 
 class MatchType(str, enum.Enum):
@@ -225,6 +229,145 @@ class HistoricalMatch(Base):
     )
 
     catalog_item: Mapped[CatalogItem] = relationship()
+
+
+class Client(Base):
+    """Клиент (покупатель) для формирования коммерческих предложений."""
+
+    __tablename__ = "clients"
+    __table_args__ = ({"comment": "Клиенты (покупатели) для КП"},)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, comment="Идентификатор клиента"
+    )
+    name: Mapped[str] = mapped_column(String(255), comment="Наименование клиента")
+    inn: Mapped[str] = mapped_column(String(12), comment="ИНН клиента")
+    address: Mapped[str] = mapped_column(Text, comment="Адрес клиента")
+    contact_person: Mapped[str] = mapped_column(String(255), comment="Контактное лицо")
+    email: Mapped[str] = mapped_column(String(255), comment="Email клиента")
+    phone: Mapped[str | None] = mapped_column(String(32), comment="Телефон клиента")
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id"), comment="Идентификатор создателя (менеджер/админ)"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), comment="Время создания записи"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), comment="Время последнего обновления"
+    )
+
+    creator: Mapped[User] = relationship()
+
+
+class AppSettings(Base):
+    """Системные настройки (singleton): реквизиты продавца и параметры НДС.
+
+    Таблица содержит одну запись: реквизиты продавца для КП и настройки НДС
+    (ставка и флаг «выделять НДС из цены»). Редактируется администратором.
+    """
+
+    __tablename__ = "app_settings"
+    __table_args__ = ({"comment": "Системные настройки (реквизиты продавца, НДС)"},)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, comment="Идентификатор записи"
+    )
+    seller_name: Mapped[str | None] = mapped_column(String(255), comment="Наименование продавца")
+    seller_inn: Mapped[str | None] = mapped_column(String(12), comment="ИНН продавца")
+    seller_kpp: Mapped[str | None] = mapped_column(String(9), comment="КПП продавца")
+    seller_address: Mapped[str | None] = mapped_column(Text, comment="Юридический адрес продавца")
+    seller_phone: Mapped[str | None] = mapped_column(String(32), comment="Телефон продавца")
+    seller_email: Mapped[str | None] = mapped_column(String(255), comment="Email продавца")
+    bank_account: Mapped[str | None] = mapped_column(String(20), comment="Расчётный счёт")
+    bank_name: Mapped[str | None] = mapped_column(String(255), comment="Наименование банка")
+    bank_bik: Mapped[str | None] = mapped_column(String(9), comment="БИК банка")
+    corr_account: Mapped[str | None] = mapped_column(String(20), comment="Корреспондентский счёт")
+    signer_name: Mapped[str | None] = mapped_column(String(255), comment="ФИО подписанта")
+    signer_position: Mapped[str | None] = mapped_column(String(255), comment="Должность подписанта")
+    vat_rate: Mapped[float] = mapped_column(
+        Numeric(5, 2), default=20.00, server_default=text("20.00"), comment="Ставка НДС, %"
+    )
+    vat_included: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), comment="НДС выделен из цены (иначе начисляется сверху)"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), comment="Время последнего обновления"
+    )
+
+
+class ProposalCounter(Base):
+    """Счётчик номеров КП по годам (сквозная нумерация со сбросом раз в год)."""
+
+    __tablename__ = "proposal_counters"
+    __table_args__ = ({"comment": "Счётчики номеров коммерческих предложений по годам"},)
+
+    year: Mapped[int] = mapped_column(primary_key=True, comment="Год нумерации")
+    last_number: Mapped[int] = mapped_column(default=0, comment="Последний использованный номер")
+
+
+class Proposal(Base):
+    """Коммерческое предложение, сформированное по спецификации клиента."""
+
+    __tablename__ = "proposals"
+    __table_args__ = (
+        Index("uq_proposals_number", "number", unique=True),
+        {"comment": "Коммерческие предложения"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, comment="Идентификатор КП"
+    )
+    number: Mapped[str] = mapped_column(String(32), comment="Номер КП (КП-{год}-{номер})")
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id"), comment="Идентификатор менеджера, сформировавшего КП"
+    )
+    client_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("clients.id"), comment="Идентификатор клиента (покупателя)"
+    )
+    upload_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("specification_uploads.id", ondelete="CASCADE"),
+        index=True,
+        comment="Идентификатор спецификации-источника",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), comment="Время создания записи"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), comment="Время последнего обновления"
+    )
+
+    user: Mapped[User] = relationship()
+    client: Mapped["Client"] = relationship()
+    upload: Mapped["SpecificationUpload"] = relationship()
+    documents: Mapped[list["ProposalDocument"]] = relationship(
+        back_populates="proposal", cascade="all, delete-orphan"
+    )
+
+
+class ProposalDocument(Base):
+    """Версия файла КП: каждое формирование добавляет новый документ."""
+
+    __tablename__ = "proposal_documents"
+    __table_args__ = ({"comment": "Файлы (версии) коммерческих предложений"},)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, comment="Идентификатор документа"
+    )
+    proposal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("proposals.id", ondelete="CASCADE"),
+        index=True,
+        comment="Идентификатор КП",
+    )
+    file_key: Mapped[str] = mapped_column(Text, comment="Ключ файла в MinIO (S3)")
+    format: Mapped[str] = mapped_column(String(8), default="pdf", comment="Формат файла")
+    rows_fingerprint: Mapped[str] = mapped_column(
+        String(64), comment="Отпечаток состава строк на момент формирования"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), comment="Время формирования файла"
+    )
+
+    proposal: Mapped[Proposal] = relationship(back_populates="documents")
 
 
 class ProposalTemplate(Base):

@@ -6,12 +6,14 @@
 """
 
 import asyncio
+import io
 import json
 from typing import Annotated
+from urllib.parse import quote
 from uuid import UUID
 
 from dishka.integrations.fastapi import DishkaRoute, FromDishka
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_current_manager
@@ -20,8 +22,10 @@ from app.core.messages import CommonMessages
 from app.models.models import User
 from app.repositories.session_repository import SessionRepository
 from app.repositories.user_repository import UserRepository
+from app.schemas.client import ClientCreate, ClientListResponse, ClientResponse, ClientUpdate
 from app.schemas.confirm_match import ConfirmMatchRequest, ConfirmMatchResponse
 from app.schemas.matching import MatchRequest, MatchResponse
+from app.schemas.proposal import ProposalGenerateRequest, ProposalItem, ProposalListResponse
 from app.schemas.specification import (
     RowMatchesResponse,
     RowStatusUpdateRequest,
@@ -30,7 +34,18 @@ from app.schemas.specification import (
     SpecificationUploadDetail,
     SpecificationUploadListResponse,
 )
+from app.services.client_service import (
+    ClientNotFoundError,
+    ClientService,
+    ClientUpdateForbiddenError,
+)
 from app.services.matching_service import MatchingService
+from app.services.proposal_service import (
+    NoRowsToExportError,
+    ProposalNotFoundError,
+    ProposalService,
+    ProposalSpecificationNotFoundError,
+)
 from app.services.security import SecurityService
 from app.services.specification_service import FileTooLargeError, SpecificationService
 from app.worker.tasks import process_specification
@@ -50,6 +65,22 @@ def parse_row_id(row_id: str) -> UUID:
     """UUID строки из пути маршрута; неверный формат — 404 (объекта с таким нет)."""
     try:
         return UUID(row_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=CommonMessages.NOT_FOUND) from None
+
+
+def parse_client_id(client_id: str) -> UUID:
+    """UUID клиента из пути маршрута; неверный формат — 404 (объекта с таким нет)."""
+    try:
+        return UUID(client_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=CommonMessages.NOT_FOUND) from None
+
+
+def parse_proposal_id(proposal_id: str) -> UUID:
+    """UUID КП из пути маршрута; неверный формат — 404 (объекта с таким нет)."""
+    try:
+        return UUID(proposal_id)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=CommonMessages.NOT_FOUND) from None
 
@@ -344,6 +375,7 @@ async def stream_specification_progress(
 )
 async def upload_specification(
     file: Annotated[UploadFile, File(...)],
+    client_id: Annotated[str, Form(...)],
     request: Request,
     settings: FromDishka[Settings],
     security_service: FromDishka[SecurityService],
@@ -360,10 +392,18 @@ async def upload_specification(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=CommonMessages.VALIDATION_ERROR)
 
     try:
+        client_uuid = UUID(client_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=CommonMessages.VALIDATION_ERROR
+        ) from None
+
+    try:
         result = await specification_service.upload_and_predict(
             fileobj=file.file,
             original_filename=file.filename,
             manager_id=manager.id,
+            client_id=client_uuid,
         )
 
         # Запустить фоновую обработку строк через Matching Engine.
@@ -375,6 +415,8 @@ async def upload_specification(
 
     except FileTooLargeError as e:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     except HTTPException:
         raise
     except Exception as e:
@@ -475,3 +517,242 @@ async def get_row_matches(
         ) from e
 
     return result
+
+
+@manager_router.get(
+    "/clients",
+    response_model=ClientListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Список клиентов (все клиенты доступны менеджерам для выбора)",
+)
+async def list_clients(
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    client_service: FromDishka[ClientService],
+    search: Annotated[str | None, Query(description="Подстрока в наименовании или ИНН")] = None,
+) -> ClientListResponse:
+    """Все клиенты системы; менеджер может выбрать любого при загрузке спецификации."""
+    await get_current_manager(request, settings, security_service, session_repository, user_repository)
+
+    try:
+        clients = await client_service.list_clients(search=search)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+    return ClientListResponse(clients=clients)
+
+
+@manager_router.post(
+    "/clients",
+    response_model=ClientResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Создать клиента",
+)
+async def create_client(
+    payload: ClientCreate,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    client_service: FromDishka[ClientService],
+) -> ClientResponse:
+    """Создать нового клиента от имени текущего менеджера."""
+    manager: User = await get_current_manager(
+        request, settings, security_service, session_repository, user_repository
+    )
+
+    try:
+        return await client_service.create_client(payload, user_id=manager.id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+
+@manager_router.patch(
+    "/clients/{client_id}",
+    response_model=ClientResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Изменить клиента (менеджер — только созданного им)",
+)
+async def update_client(
+    client_id: str,
+    payload: ClientUpdate,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    client_service: FromDishka[ClientService],
+) -> ClientResponse:
+    """Обновить клиента; менеджер может изменять только созданных им клиентов."""
+    manager: User = await get_current_manager(
+        request, settings, security_service, session_repository, user_repository
+    )
+
+    try:
+        return await client_service.update_client(
+            parse_client_id(client_id), payload, user_id=manager.id, is_admin=False
+        )
+    except ClientNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except ClientUpdateForbiddenError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+
+@manager_router.get(
+    "/specifications/{upload_id}/proposal",
+    response_model=ProposalItem | None,
+    status_code=status.HTTP_200_OK,
+    summary="Текущее КП по спецификации (без формирования файла)",
+)
+async def get_specification_proposal(
+    upload_id: str,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    proposal_service: FromDishka[ProposalService],
+) -> ProposalItem | None:
+    """Метаданные КП: номер, наличие файла и признак устаревания (null, если КП ещё не формировалось)."""
+    manager: User = await get_current_manager(
+        request, settings, security_service, session_repository, user_repository
+    )
+    try:
+        return await proposal_service.get_state(parse_upload_id(upload_id), manager.id)
+    except ProposalSpecificationNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+
+@manager_router.post(
+    "/specifications/{upload_id}/proposal",
+    response_model=ProposalItem,
+    status_code=status.HTTP_200_OK,
+    summary="Сформировать КП по спецификации (или вернуть существующее)",
+)
+async def generate_specification_proposal(
+    upload_id: str,
+    payload: ProposalGenerateRequest,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    proposal_service: FromDishka[ProposalService],
+) -> ProposalItem:
+    """Сформировать PDF КП; `force=true` — новая версия файла под тем же номером."""
+    manager: User = await get_current_manager(
+        request, settings, security_service, session_repository, user_repository
+    )
+    try:
+        return await proposal_service.generate(
+            parse_upload_id(upload_id), manager.id, force=payload.force
+        )
+    except ProposalSpecificationNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except NoRowsToExportError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+
+@manager_router.get(
+    "/proposals",
+    response_model=ProposalListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="История сформированных КП менеджера",
+)
+async def list_proposals(
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    proposal_service: FromDishka[ProposalService],
+) -> ProposalListResponse:
+    """Все КП текущего менеджера (свежие — первыми)."""
+    manager: User = await get_current_manager(
+        request, settings, security_service, session_repository, user_repository
+    )
+    try:
+        proposals = await proposal_service.list_proposals(manager.id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+    return ProposalListResponse(proposals=proposals)
+
+
+@manager_router.get(
+    "/proposals/{proposal_id}/download",
+    status_code=status.HTTP_200_OK,
+    summary="Скачать PDF КП (формирует файл при первом обращении)",
+)
+async def download_proposal(
+    proposal_id: str,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    proposal_service: FromDishka[ProposalService],
+) -> StreamingResponse:
+    """Отдать последнюю версию файла КП; при отсутствии файла — сформировать."""
+    manager: User = await get_current_manager(
+        request, settings, security_service, session_repository, user_repository
+    )
+    try:
+        content, filename = await proposal_service.download(parse_proposal_id(proposal_id), manager.id)
+    except ProposalNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except NoRowsToExportError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )

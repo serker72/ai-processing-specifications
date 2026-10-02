@@ -24,12 +24,14 @@ class SpecificationRepository:
     async def create(
         self,
         manager_id: UUID,
+        client_id: UUID,
         file_key: str,
         status: UploadStatus = UploadStatus.pending,
     ) -> SpecificationUpload:
         """Создать запись о загрузке спецификации."""
         upload = SpecificationUpload(
             manager_id=manager_id,
+            client_id=client_id,
             file_key=file_key,
             status=status,
         )
@@ -53,6 +55,7 @@ class SpecificationRepository:
         """Список загрузок спецификаций менеджера, свежие — первыми."""
         result = await self._session.execute(
             select(SpecificationUpload)
+            .options(selectinload(SpecificationUpload.client))
             .where(SpecificationUpload.manager_id == manager_id)
             .order_by(SpecificationUpload.created_at.desc())
         )
@@ -72,7 +75,9 @@ class SpecificationRepository:
         здесь, чтобы эндпоинт не отличал «нет файла» от «файл другого менеджера».
         """
         result = await self._session.execute(
-            select(SpecificationUpload).where(
+            select(SpecificationUpload)
+            .options(selectinload(SpecificationUpload.client))
+            .where(
                 SpecificationUpload.id == upload_id,
                 SpecificationUpload.manager_id == manager_id,
             )
@@ -126,6 +131,23 @@ class SpecificationRepository:
             (status.value if hasattr(status, "value") else str(status)): int(count)
             for status, count in result.all()
         }
+
+    async def list_rows_for_export(self, upload_id: UUID) -> list[SpecificationRow]:
+        """Строки для формирования КП: подтверждённые и сопоставленные, по порядку.
+
+        Позиция каталога подгружается заранее (selectinload): цена и артикул
+        берутся из каталога, а не из файла клиента.
+        """
+        result = await self._session.execute(
+            select(SpecificationRow)
+            .options(selectinload(SpecificationRow.matched_item))
+            .where(
+                SpecificationRow.upload_id == upload_id,
+                SpecificationRow.status.in_([RowStatus.confirmed, RowStatus.matched]),
+            )
+            .order_by(SpecificationRow.row_number)
+        )
+        return list(result.scalars().all())
 
     async def get_row(self, upload_id: UUID, row_id: UUID) -> SpecificationRow | None:
         """Строка спецификации, только если она принадлежит загрузке.
