@@ -39,6 +39,7 @@ export const ROLE_NAV: Record<UserRole, NavSection> = {
       { to: '/admin/pricelists', label: 'Прайс-листы' },
       { to: '/admin/catalog', label: 'Каталог' },
       { to: '/admin/proposal-templates', label: 'Шаблоны КП' },
+      { to: '/admin/settings', label: 'Настройки' },
     ],
   },
   manager: {
@@ -46,6 +47,7 @@ export const ROLE_NAV: Record<UserRole, NavSection> = {
     items: [
       { to: '/manager/specifications', label: 'Загрузка спецификации' },
       { to: '/manager/uploads', label: 'Список спецификаций' },
+      { to: '/manager/proposals', label: 'Коммерческие предложения' },
     ],
   },
 }

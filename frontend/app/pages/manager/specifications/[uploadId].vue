@@ -34,6 +34,43 @@
       </span>
     </div>
 
+    <!-- Коммерческое предложение: формирование и скачивание PDF -->
+    <div class="proposal-panel">
+      <h3>Коммерческое предложение</h3>
+      <p v-if="proposalError" class="text-danger">{{ proposalError }}</p>
+      <template v-if="proposal">
+        <p class="text-sm">
+          <strong>{{ proposal.number }}</strong> ·
+          версий файла: {{ proposal.documents_count }} ·
+          клиент: {{ proposal.client_name ?? '—' }}
+        </p>
+        <p v-if="proposal.needs_regeneration" class="proposal-warning">
+          Данные спецификации изменились после формирования КП — рекомендуем
+          сформировать повторно (номер КП сохранится).
+        </p>
+        <div class="flex flex-wrap gap-2">
+          <button class="btn-action" :disabled="proposalLoading" @click="downloadProposal">
+            Скачать PDF
+          </button>
+          <button
+            class="btn-secondary"
+            :disabled="proposalLoading"
+            @click="generateProposal(true)"
+          >
+            {{ proposal.needs_regeneration ? 'Сформировать повторно' : 'Обновить файл' }}
+          </button>
+        </div>
+      </template>
+      <template v-else>
+        <p class="text-muted text-sm">
+          КП ещё не формировалось. В него войдут строки в статусах matched и confirmed.
+        </p>
+        <button class="btn-action" :disabled="proposalLoading" @click="generateProposal(false)">
+          {{ proposalLoading ? 'Формирование…' : 'Сформировать КП' }}
+        </button>
+      </template>
+    </div>
+
     <!-- SSE-лог -->
     <div v-if="sseMessages.length" class="sse-log">
       <h3>Лог обработки ({{ sseMessages.length }} событий)</h3>
@@ -248,6 +285,25 @@ const loading = ref(false)
 const error = ref('')
 const sseMessages = ref<string[]>([])
 
+// Коммерческое предложение
+interface ProposalItem {
+  id: string
+  number: string
+  created_at: string
+  client_id: string
+  client_name: string | null
+  upload_id: string
+  filename: string | null
+  documents_count: number
+  latest_document_id: string | null
+  has_document: boolean
+  needs_regeneration: boolean
+}
+
+const proposal = ref<ProposalItem | null>(null)
+const proposalLoading = ref(false)
+const proposalError = ref('')
+
 // Диалог подтверждения
 const showConfirmDialog = ref(false)
 const confirmRow = ref<SpecificationRowItem | null>(null)
@@ -362,8 +418,56 @@ async function updateRowStatus(rowId: string, status: 'confirmed' | 'excluded', 
     confirmRow.value = null
     await loadRows(page.value)
     await loadUploadDetail()
+    await loadProposal()
   } catch (err: any) {
     error.value = err?.data?.detail || 'Не удалось обновить статус строки'
+  }
+}
+
+async function loadProposal() {
+  proposalError.value = ''
+  try {
+    proposal.value = await $api(`/manager/specifications/${uploadId}/proposal`)
+  } catch (err: any) {
+    proposalError.value = err?.data?.detail || 'Не удалось загрузить данные КП'
+  }
+}
+
+async function generateProposal(force: boolean) {
+  proposalLoading.value = true
+  proposalError.value = ''
+  try {
+    proposal.value = await $api(`/manager/specifications/${uploadId}/proposal`, {
+      method: 'POST',
+      body: { force },
+    })
+  } catch (err: any) {
+    proposalError.value = err?.data?.detail || 'Не удалось сформировать КП'
+  } finally {
+    proposalLoading.value = false
+  }
+}
+
+async function downloadProposal() {
+  if (!proposal.value) return
+  proposalLoading.value = true
+  proposalError.value = ''
+  try {
+    const blob = await $api(`/manager/proposals/${proposal.value.id}/download`, {
+      responseType: 'blob',
+    })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${proposal.value.number}.pdf`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+  } catch (err: any) {
+    proposalError.value = err?.data?.detail || 'Не удалось скачать КП'
+  } finally {
+    proposalLoading.value = false
   }
 }
 
@@ -375,6 +479,7 @@ onMounted(async () => {
   }
   await loadUploadDetail()
   await loadRows(1)
+  await loadProposal()
   openStream(uploadId)
 })
 
@@ -382,3 +487,21 @@ onBeforeUnmount(() => {
   stopStream()
 })
 </script>
+
+<style scoped>
+.proposal-panel {
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 15px;
+  margin-bottom: 20px;
+}
+
+.proposal-panel h3 {
+  margin-top: 0;
+}
+
+.proposal-warning {
+  color: var(--app-danger);
+  font-size: 0.875rem;
+}
+</style>
