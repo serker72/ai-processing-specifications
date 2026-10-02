@@ -206,14 +206,87 @@ P0 закрыт: каталог наполняется (`vectorize_catalog` из
 
 ## Шаги
 
-1. **Экспорт КП (задача 7.2, ключевая недостающая функция).**
-   `GET /api/v1/manager/specifications/{upload_id}/export?format=pdf|xlsx`:
-   джоин `SpecificationRow` (confirmed, quantity) × `CatalogItem` (price, sku, unit),
-   суммы и НДС; PDF — WeasyPrint + Jinja2 по текущему шаблону
-   (`ProposalTemplateService.get_current_template`), XLSX — openpyxl; файл в MinIO
-   (`exports/…`) + отдача браузеру. Зависимости: `weasyprint`, `jinja2` (проверить, что
-   системные libs WeasyPrint ставятся в backend-образ Dockerfile).
-   Frontend: кнопка «Скачать КП» на рабочем столе менеджера.
+1. **Экспорт КП (задача 7.2, ключевая недостающая функция).** Разбит на подпункты
+   P2.1.1–P2.1.7 (ниже). Решения зафиксированы 2026-10-02.
+
+   **Зафиксированные решения:**
+   - **Состав КП:** строки в статусах `confirmed` и `matched` (у `matched` позиция
+     каталога всегда есть); `excluded` / `pending` / `unmatched` не включаются.
+   - **Цена:** из `CatalogItem.price` (не из цены в файле клиента). Пустое `quantity`
+     → строка исключается. Если включённых строк нет → `400`.
+   - **НДС:** ставка и флаг «выделять НДС из цены» — в таблице системных настроек
+     (одна запись, правит админ). Ставка — `20.00` (проценты).
+     Состав колонок таблицы КП **одинаков** в обоих режимах: `Цена`, `Сумма`.
+     Итоговые строки внизу:
+     * «Итого» — сумма по строкам (Кол-во × Цена);
+     * `vat_included=true` → «В том числе НДС {vat_rate}%» = Итого × vat_rate/(100+vat_rate);
+       `vat_included=false` → «Без НДС» (сумма в «Итого» указана без НДС);
+     * «Всего» — итог к оплате: при `vat_included=true` = Итого, при `vat_included=false`
+       = Итого + НДС.
+   - **Настройки (singleton):** реквизиты продавца (наименование, ИНН, КПП, юр. адрес,
+     телефон, email, р/с, банк, БИК, к/с, подписант — ФИО, должность) + `vat_rate`,
+     `vat_included`.
+   - **Клиенты:** наименование, ИНН, адрес, контактное лицо, email — обязательны;
+     телефон — необязателен. Менеджеры видят всех клиентов, но изменяют только своих;
+     админы видят всех и изменяют любых.
+   - **PDF:** WeasyPrint + Jinja2; сначала загруженный шаблон
+     (`ProposalTemplateService.get_current_template`), если нет — встроенный дефолтный
+     с условными блоками (`{% if vat_included %}`). Контекст фиксируется и документируется.
+   - **Хранение КП:** `proposals` (номер, дата, `user_id`, `client_id`, `upload_id`) +
+     `proposal_documents` (версии файлов: `file_key`, `format`, `rows_fingerprint`).
+     Нумерация `КП-{год}-{5 цифр}`, глобальная, сброс раз в год.
+   - **Скачивание:** формируется при первом запросе, повторные клики отдают готовый файл.
+     «Сформировать повторно» — номер тот же, новый файл добавляется в историю документов,
+     старый остаётся.
+   - **Контроль изменений строк:** `rows_fingerprint` (SHA-256 канонического JSON
+     включённых строк) сравнивается при открытии рабочего стола; при расхождении UI
+     показывает «Данные изменились» и предлагает переформировать.
+   - **XLSX** в этой итерации не реализуется.
+   - **История КП:** менеджер видит только свои; страница `/manager/proposals`.
+   - **Очистка спецификаций:** существующие `specification_uploads` (smoke-данные) удалить,
+     `client_id` сделать обязательным.
+
+   **Подпункты:**
+   - ✅ **P2.1.1** Backend: системные настройки — таблица `app_settings` (singleton), миграция
+     `c1a2b3d4e5f6`, репозиторий/сервис, `GET/PATCH /api/v1/admin/settings`.
+   - ✅ **P2.1.2** Backend: клиенты — таблица `clients`, миграция `d2b3c4e5f6a7`,
+     репозиторий/сервис, `GET/POST /api/v1/manager/clients`,
+     `PATCH /api/v1/manager/clients/{id}` (только свои), `GET/PATCH /api/v1/admin/clients`.
+   - ✅ **P2.1.3** Backend: очистка спецификаций, `client_id` (NOT NULL) в
+     `specification_uploads` (миграция `e3c4d5f6a7b8`), приём `client_id` при загрузке
+     спецификации (`POST /manager/specifications`).
+   - ✅ **P2.1.4** Backend: генерация PDF КП — `proposals` + `proposal_documents` +
+     `proposal_counters` (миграция `f4d5e6a7b8c9`); встроенный шаблон с условными
+     блоками; WeasyPrint; MinIO; эндпоинты формирования/скачивания/повторного
+     формирования/истории.
+   - ✅ **P2.1.5** Frontend: страница настроек в админке (`/admin/settings`).
+   - ✅ **P2.1.6** Frontend: выбор/создание клиента при загрузке спецификации.
+   - ✅ **P2.1.7** Frontend: панель формирования/скачивания КП на рабочем столе
+     (`manager/specifications/[uploadId].vue`), страница истории `/manager/proposals`,
+     пункт меню «Коммерческие предложения».
+   - ✅ **P2.1.8** Проверка: `ruff check app/` — чисто; `npm run build` — успешно;
+     smoke в docker compose пройден 2026-10-02 (см. «Smoke P2.1» ниже).
+
+   **Дефекты, найденные при smoke P2.1 (исправлены 2026-10-02):**
+   - **Enum `tp_row_status` без `processing`/`unmatched`.** Enum создавался по ранней
+     версии `RowStatus`, а позже в модели появились `processing`/`unmatched` без
+     миграции. Воркер Matching Engine пишет `unmatched` → обработка спецификаций падала
+     (`InvalidTextRepresentation`). Исправлено миграцией `a5e6f7b8c9d0`
+     (`ALTER TYPE ... ADD VALUE IF NOT EXISTS`, в `autocommit_block`).
+   - **Устаревший счётчик документов КП в ответе сразу после формирования.**
+     `selectinload` возвращал identity-mapped `Proposal` с закэшированной пустой
+     коллекцией `documents`, поэтому POST отдавал `documents_count: 0`. Исправлено
+     `execution_options(populate_existing=True)` в `get_by_id`/`get_by_upload`
+     (`proposal_repository.py`).
+
+   **Smoke P2.1 (2026-10-02):** миграции `c1a2b3d4e5f6`→`a5e6f7b8c9d0` применены;
+   `GET/PATCH /admin/settings` (реквизиты + НДС) работают; `GET/POST/PATCH
+   /manager/clients` и `GET /admin/clients` работают; `POST
+   /manager/specifications` валидирует `client_id` (400 при неизвестном, 422 без
+   поля); КП по спецификации сформировано (`КП-2026-00001`), PDF скачивается
+   (`application/pdf`, `%PDF-`), `force=true` добавляет версию под тем же номером
+   (docs 1→2→3→4); смена статуса строки переключает `needs_regeneration=true`;
+   режимы НДС (`vat_included=false/true`) отдают PDF. Логи backend без ошибок.
 2. **Редактирование каталога (админ).** Сейчас `GET /admin/catalog` read-only:
    `PATCH /api/v1/admin/catalog/{item_id}` (price, unit, name) + форма на
    `pages/admin/catalog.vue`. Правки цены не пересоздают эмбеддинг (он по наименованию).
