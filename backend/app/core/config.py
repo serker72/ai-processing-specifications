@@ -154,8 +154,8 @@ class LlmSettings(BaseSettings):
     # Параметры генерации
     temperature: float = 0.0
     max_tokens: int = 1024
-    # Таймаут запроса к LLM, сек
-    request_timeout: int = 60
+    # Таймаут запроса к LLM, сек (на CPU-моделях анализ широких прайсов медленный)
+    request_timeout: int = 180
 
 
 class OpenAISettings(BaseSettings):

@@ -318,14 +318,19 @@ class PriceListService:
                 (
                     '{"sku_column": "<колонка с артикулом/кодом товара>", '
                     '"name_column": "<колонка с наименованием товара>", '
-                    '"price_column": "<колонка с ценой или null>", '
+                    '"price_column": "<ровно одна колонка с ценой или null>", '
+                    '"unit_column": "<колонка с единицей измерения или null>", '
                     '"additional_columns": {"<имя колонки>": "<роль>"}\n'
                     "}"
                 ),
                 "",
                 (
-                    "Значения — точные названия колонок из списка выше. Пример: "
-                    '{"sku_column": "Код", "name_column": "Товар", "price_column": "Цена", '
+                    "Значения sku_column/name_column/price_column/unit_column — точные "
+                    "названия колонок из списка выше (строки, не объекты). Если ценовых "
+                    "колонок несколько, выбери одну основную (розничную, «РРЦ», "
+                    "с НДС), а остальные отнеси в additional_columns. Пример: "
+                    '{"sku_column": "Артикул", "name_column": "Наименование", '
+                    '"price_column": "РРЦ с НДС (22%)", "unit_column": "Ед.", '
                     '"additional_columns": {}}'
                 ),
             ]
@@ -338,13 +343,14 @@ class PriceListService:
                 "sku_column": {"type": "string"},
                 "name_column": {"type": "string"},
                 "price_column": {"type": ["string", "null"]},
+                "unit_column": {"type": ["string", "null"]},
                 "additional_columns": {"type": "object"},
             },
-            "required": ["sku_column", "name_column", "price_column", "additional_columns"],
+            "required": ["sku_column", "name_column", "price_column", "unit_column", "additional_columns"],
         }
         result = await self._llm.complete_json(
             "Ты определяешь роли колонок прайс-листа. Отвечай только JSON без пояснений.",
             prompt,
             schema,
         )
-        return ColumnMappingPrediction.from_llm_response(result)
+        return ColumnMappingPrediction.from_llm_response(result, valid_columns=set(headers))
