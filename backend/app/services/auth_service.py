@@ -160,7 +160,12 @@ class AuthService:
             httponly=True,
             samesite="lax",
         )
-        # Refresh-кука: долгоживущая, область ограничена путём auth-эндпоинтов
+        # Refresh-кука: долгоживущая, область ограничена путём auth-эндпоинтов.
+        # SameSite=Strict (в отличие от access-куки): refresh вызывается только
+        # XHR-запросами внутри приложения, кросс-сайтовых вызовов нет (фронтенд и
+        # API отдаются с одного origin через nginx), поэтому Strict закрывает CSRF
+        # без потери функциональности. Access-кука оставлена Lax: короткоживущая,
+        # участвует в навигациях/SSR.
         response.set_cookie(
             key=self._jwt_settings.refresh_cookie_name,
             value=token_pair.refresh_token,
@@ -169,7 +174,7 @@ class AuthService:
             domain=self._jwt_settings.cookie_domain,
             secure=self._jwt_settings.cookie_secure,
             httponly=True,
-            samesite="lax",
+            samesite="strict",
         )
 
     def _clear_token_cookies(self, response: Response) -> None:
