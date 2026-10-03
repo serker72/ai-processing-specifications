@@ -30,15 +30,50 @@
             <th>Ед. изм.</th>
             <th>Цена</th>
             <th>Добавлена</th>
+            <th>Действия</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="item in items" :key="item.id">
             <td class="mono">{{ item.sku }}</td>
-            <td>{{ item.name }}</td>
-            <td>{{ item.unit || '—' }}</td>
-            <td>{{ formatPrice(item.price) }}</td>
+            <td>
+              <input v-if="editingId === item.id" v-model="editForm.name" class="form-control" />
+              <span v-else>{{ item.name }}</span>
+            </td>
+            <td>
+              <input v-if="editingId === item.id" v-model="editForm.unit" class="form-control" />
+              <span v-else>{{ item.unit || '—' }}</span>
+            </td>
+            <td>
+              <input
+                v-if="editingId === item.id"
+                v-model="editForm.price"
+                class="form-control"
+                type="number"
+                min="0"
+                step="0.01"
+              />
+              <span v-else>{{ formatPrice(item.price) }}</span>
+            </td>
             <td>{{ formatDate(item.created_at) }}</td>
+            <td>
+              <template v-if="editingId === item.id">
+                <button class="btn-icon" :disabled="isSaving" title="Сохранить" @click="saveItem(item)">
+                  💾
+                </button>
+                <button
+                  class="btn-icon"
+                  :disabled="isSaving"
+                  title="Отмена"
+                  @click="editingId = null"
+                >
+                  ✖️
+                </button>
+              </template>
+              <button v-else class="btn-icon" title="Редактировать" @click="startEdit(item)">
+                ✏️
+              </button>
+            </td>
           </tr>
         </tbody>
       </table>
@@ -69,7 +104,8 @@
 
 <script setup lang="ts">
 /**
- * Каталог номенклатуры: страницы позиций из GET /admin/catalog.
+ * Каталог номенклатуры: страницы позиций из GET /admin/catalog и инлайн-правка
+ * наименования/единицы/цены через PATCH /admin/catalog/{id}.
  * Позиции наполняются из прайс-листов после подтверждения маппинга колонок,
  * поэтому поиск и пагинация нужны — листы бывают на тысячи строк.
  */
@@ -98,6 +134,11 @@ const search = ref('')
 const searchQuery = ref('')
 const isLoading = ref(false)
 const error = ref('')
+
+// Правка позиции в таблице: id редактируемой строки и её новые значения
+const editingId = ref<string | null>(null)
+const isSaving = ref(false)
+const editForm = ref({ name: '', unit: '', price: '' })
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 
@@ -143,6 +184,50 @@ function resetSearch() {
 function goToPage(target: number) {
   page.value = Math.min(Math.max(1, target), totalPages.value)
   loadCatalog()
+}
+
+function startEdit(item: CatalogItem) {
+  editingId.value = item.id
+  editForm.value = {
+    name: item.name,
+    unit: item.unit ?? '',
+    price: item.price === null ? '' : String(item.price),
+  }
+}
+
+async function saveItem(item: CatalogItem) {
+  const name = editForm.value.name.trim()
+  if (!name) {
+    error.value = 'Наименование не может быть пустым'
+    return
+  }
+
+  const price = editForm.value.price === '' ? null : Number(editForm.value.price)
+  if (price !== null && (!Number.isFinite(price) || price < 0)) {
+    error.value = 'Цена должна быть неотрицательным числом'
+    return
+  }
+
+  isSaving.value = true
+  error.value = ''
+  try {
+    const updated = await $api(`/admin/catalog/${item.id}`, {
+      method: 'PATCH',
+      body: {
+        name,
+        unit: editForm.value.unit.trim() || null,
+        price,
+      },
+    })
+    item.name = updated.name
+    item.unit = updated.unit
+    item.price = updated.price
+    editingId.value = null
+  } catch (err: any) {
+    error.value = err?.data?.detail || 'Не удалось сохранить изменения'
+  } finally {
+    isSaving.value = false
+  }
 }
 
 onMounted(loadCatalog)
