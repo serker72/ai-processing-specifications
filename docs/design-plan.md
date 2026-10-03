@@ -6,7 +6,7 @@
 * **Backend:** FastAPI, SQLAlchemy 2.0 (async), Alembic, Celery (или arq) для фоновых задач.
 * **База данных и кэш:** PostgreSQL 17 (с расширением `pgvector`), Redis 7. Драйвер БД — `psycopg3` (`psycopg[binary,pool]`).
 * **Хранилище файлов:** MinIO (S3-совместимое).
-* **AI/LLM:** OpenAI API (`text-embedding-3-small` для векторов, `gpt-4o-mini` для анализа колонок) через библиотеку `openai` или `litellm`.
+* **AI/LLM:** `litellm` как единый фасад. Эмбеддинги — локальная модель `intfloat/multilingual-e5-base` (768-dim, `EmbeddingService`); анализ колонок/предсказание маппинга — по умолчанию локальная `ollama/qwen2.5:7b`, опционально облачная `gpt-4o-mini` (`LLM_PROVIDER=openai`).
 * **Frontend:** Nuxt 3, Vue 3, TailwindCSS, `thumbmarkjs` (для fingerprinting).
 * **Ролевая модель:** `admin` (управление каталогом поставщиков), `manager` (разбор спецификаций клиентов).
 
@@ -35,7 +35,7 @@
 * Использовать DSN формата: `postgresql+psycopg://user:password@host:port/dbname`.
 * Создать декларативные модели:
 * `User`: (id, email, password_hash, role [`admin`, `manager`]).
-* `CatalogItem`: (id, sku, name, unit, price, embedding `Vector(1536)`). Настроить индекс HNSW (`vector_cosine_ops`).
+* `CatalogItem`: (id, sku, name, unit, price, embedding `Vector(768)`). Настроить индекс HNSW (`vector_cosine_ops`).
 * `PriceListUpload`: сессии загрузки прайсов (admin_id).
 * `SpecificationUpload`: сессии загрузки спецификаций (manager_id, column_mapping).
 * `SpecificationRow`: строки спецификаций (raw_data, matched_item_id, match_type, status).
@@ -55,7 +55,7 @@
 * **Требования к AI:**
 * Эндпоинт `POST /api/v1/auth/login`. Принимает `email`, `password` и `fingerprint` (клиентский хэш браузера от thumbmarkjs).
 * Генерация `access_token` (15 мин) и `refresh_token` (7 дней). В payload вшивается хэш `fingerprint`.
-* Возврат токенов клиенту **только** через заголовки `Set-Cookie` (`HttpOnly`, `Secure`, `SameSite=Lax`).
+* Возврат токенов клиенту **только** через заголовки `Set-Cookie` (`HttpOnly`, `Secure`). `SameSite`: access-кука — `Lax` (короткоживущая, участвует в навигациях/SSR), refresh-кука — `Strict` (вызывается только XHR внутри приложения, кросс-сайтовых refresh нет).
 
 
 
@@ -79,7 +79,7 @@
 * **Требования к AI:**
 * Эндпоинт `POST /api/v1/admin/pricelists` (только для роли `admin`).
 * Файл сохраняется в MinIO.
-* Чтение первых 50 строк (pandas/openpyxl) -> отправка в `gpt-4o-mini` с использованием Structured Outputs.
+* Чтение первых 50 строк (openpyxl) -> отправка в LLM (`litellm`: `ollama/qwen2.5:7b` по умолчанию, `gpt-4o-mini` опционально) с использованием Structured Outputs.
 * LLM возвращает Pydantic-схему ролей колонок (Где артикул? Где название? Где цена?).
 * Возврат предложенного маппинга на фронтенд для ручного подтверждения администратором.
 
@@ -90,7 +90,7 @@
 * **Требования к AI:**
 * Фоновая задача Celery (после подтверждения маппинга).
 * Построчное чтение прайс-листа из S3.
-* Батчевая генерация эмбеддингов (`text-embedding-3-small`) пачками по 500 строк.
+* Батчевая генерация эмбеддингов (`intfloat/multilingual-e5-base`, 768-dim) пачками по 500 строк.
 * Эффективный UPSERT через `psycopg3` в таблицу `CatalogItem`.
 
 
@@ -124,7 +124,7 @@
 
 * **Требования к AI:**
 * Эндпоинт `POST /api/v1/manager/specifications` (Доступ: `manager`).
-* Загрузка Excel, чтение превью, вызов `gpt-4o-mini` для предсказания колонок (name, quantity и т.д.).
+* Загрузка Excel, чтение превью, вызов LLM (`litellm`) для предсказания колонок (name, quantity и т.д.).
 * Сохранение конфигурации (маппинга).
 * **Реализация:**
   * ✅ Эндпоинт `POST /api/v1/manager/specifications` (manager role).
@@ -186,9 +186,17 @@
   * **Управление сессиями:** Активные сессии пользователей, функция принудительного выхода (отзыв сессии).
   * Форма загрузки прайс-листов, интерфейс подтверждения колонок, таблица номенклатуры (каталог).
 * **Manager UI:**
-  * Рабочий стол спецификации. Таблица с виртуальным скроллом, подключенная к SSE.
+  * Рабочий стол спецификации. Таблица строк с пагинацией, подключенная к SSE.
   * Цветовое кодирование: зеленый (Точное совпадение), желтый (ТОП-5 на выбор), красный (Не найдено).
   * Действия пользователя (Выбрать из списка, Исключить, Подтвердить) записывают связи в базу `HistoricalMatch` для Tier-1.
+  * ⚠️ **Отклонение от исходного плана: виртуальный скролл заменён серверной пагинацией.**
+    Причина: `GET /api/v1/manager/specifications/{id}/rows` уже отдаёт строки страницами
+    (`{rows, total, page, page_size}`); строки реактивно меняются во время SSE-обработки
+    (`processing` → `matched`/`unmatched`) и при действиях менеджера, а при виртуализации
+    пришлось бы согласовывать вставки/обновления в списке — сложнее и рискованнее. При
+    спецификациях по 50 строк на страницу выигрыш виртуализации (тысячи DOM-узлов) не
+    проявляется. Фактическая реализация — `app/pages/manager/specifications/[uploadId].vue`
+    (пагинация по 50 строк).
 
 * **✅ Реализация:**
 * **Общий Layout** (`app/layouts/workspace.vue`): единый Sidebar для администратора и менеджера + кнопка выхода; наполнение меню по роли — `app/composables/useNavMenu.ts`. Домашний маршрут роли (`useAuth.ROLE_HOME`) берётся из первого пункта `ROLE_NAV`, поэтому меню и редирект после входа не могут разойтись. Заглушка `pages/dashboard.vue` удалена.
@@ -201,13 +209,17 @@
 * **Users** (`app/pages/admin/users.vue`): таблица пользователей из `/admin/users`, выбор роли → PATCH; своя строка заблокирована на клиенте так же, как на backend.
 * **Devices** (`app/pages/admin/devices.vue`): список устройств (хэш сокращён, полный — в `title`), блокировка/разблокировка PATCH-запросом.
 * **Sessions** (`app/pages/admin/sessions.vue`): активные сессии (email пользователя, отпечаток, срок истечения refresh-токена), отзыв DELETE-запросом.
-* **Pricelists** (`app/pages/admin/pricelists.vue`): загрузка Excel (multipart через `$api`) + история загрузок со статусами обработки.
+* **Pricelists** (`app/pages/admin/pricelists/index.vue`): загрузка Excel (multipart через `$api`) + история загрузок со статусами обработки, фильтр-чипы по статусу и пагинация.
 * **Catalog** (`app/pages/admin/catalog.vue`): таблица номенклатуры с поиском и пагинацией.
 * **Шаблоны КП** (`app/pages/admin/proposal-templates.vue`): загрузка, правка названия/даты (PATCH) и удаление; ошибки показываются на странице, а не `alert`/`console`.
-* **Manager** (`app/pages/manager/specifications.vue`): Загрузка спецификаций + SSE-лог обработки.
+* **Manager** (`app/pages/manager/specifications/index.vue`): загрузка спецификаций + SSE-лог обработки; рабочий стол строк — `app/pages/manager/specifications/[uploadId].vue`.
 * **Middleware** (`app/middleware/auth-guard.global.ts`): глобальный, защищает роуты `/admin/*` и `/manager/*` по роли из `/auth/me`. Работает на клиенте (куки ставит backend на своём origin, SSR их не видит) — настоящий контроль ролей остаётся на backend (`require_role`).
 * **Smoke-тест:** сборка Nuxt — 2.16 MB (548 kB gzip), все роуты доступны; эндпоинты: admin — 200, manager на `/admin/*` — 403, гость — 401; блокировка устройства → вход с него 403, после разблокировки — 204; отзыв сессии уменьшает список и повторяет 404.
-* **Осталось в рамках задачи:** редактирование каталога (backend отдаёт только чтение), интерфейс подтверждения колонок прайс-листа, виртуальный скролл таблицы спецификаций и действия менеджера (выбрать из ТОП-N / исключить / подтвердить) с записью в `HistoricalMatch` — эндпоинты на backend есть, в UI не подключены.
+* **Осталось в рамках задачи:** ничего критичного; см. примечание об отклонении
+  (виртуальный скролл → пагинация). Фильтрация пользователей по роли в UI не реализована —
+  таблица `app/pages/admin/users.vue` показывает всех пользователей со сменой роли. Прочее
+  из ранее перечисленного закрыто: редактирование каталога (P2.2), интерфейс подтверждения
+  колонок прайс-листа (P0), действия менеджера над строками (P1).
 
 
 ### Задача 6.3: Добавить TailwindCSS и темы
@@ -259,15 +271,19 @@
   * ✅ `ProposalTemplateRepository` (create/get_by_id/list_all/get_max_start_date/get_current_template/update/delete) и `ProposalTemplateService` с валидацией дат в UTC.
   * ✅ `POST`/`GET` `/api/v1/admin/proposal-templates`, `PATCH`/`DELETE /api/v1/admin/proposal-templates/{id}` (multipart: `file`, `name`, `start_date`; проверка расширения `.html`).
   * ✅ DI-провайдеры репозитория и сервиса; `MinioService.download_fileobj` для чтения HTML.
-  * ✅ Страница `/admin/proposal-templates`: форма загрузки, таблица, удаление, подсветка действующего шаблона.
-  * ⚠️ `PATCH` реализован на backend, в UI редактирование названия/даты не подключено.
+  * ✅ Страница `/admin/proposal-templates`: форма загрузки, таблица, удаление, подсветка действующего шаблона, инлайн-редактирование названия/даты (PATCH).
 
 ### Задача 7.2: Сборка и экспорт документа
 
 * **Требования к AI:**
-* Эндпоинт `GET /api/v1/manager/specifications/{id}/export?format=pdf|xlsx`.
+* Эндпоинт экспорта КП (только PDF).
 * Джоин подтвержденных `SpecificationRow` (количество) с `CatalogItem` (цена, артикул). Расчет сумм и НДС.
 * Генерация PDF (через `weasyprint` + HTML шаблон Jinja2), сохранение в MinIO, скачивание в браузере пользователя.
 
+* **✅ Реализация:**
+  * ✅ Backend: `ProposalService` + `proposals`/`proposal_documents`/`proposal_counters` (миграция `f4d5e6a7b8c9`); состав КП — строки `confirmed`/`matched`; цена из `CatalogItem`; НДС из системных настроек; `rows_fingerprint` для контроля устаревания; нумерация `КП-{год}-{5 цифр}`.
+  * ✅ Эндпоинты (фактические, вместо `.../export?format=...`): `GET/POST /api/v1/manager/specifications/{upload_id}/proposal` (текущее состояние / формирование, `force`), `GET /api/v1/manager/proposals` (история менеджера), `GET /api/v1/manager/proposals/{proposal_id}/download` (PDF из MinIO).
+  * ✅ Frontend: панель формирования/скачивания на рабочем столе (`manager/specifications/[uploadId].vue`) и страница истории `/manager/proposals`.
+  * ⚠️ **XLSX не реализован** (только PDF); параметра `format` нет.
 
-* **DoD:** Менеджер получает оформленный файл коммерческого предложения по клику на кнопку в UI.
+* **DoD:** Менеджер получает оформленный файл коммерческого предложения по клику на кнопку в UI. ✅ Выполнено (PDF).
