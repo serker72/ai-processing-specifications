@@ -43,8 +43,13 @@ class PriceListRepository:
         """
         await self._session.commit()
 
-    async def list_filtered(self, status: UploadStatus | None = None) -> list[PriceListUpload]:
-        """Все загрузки, свежие первыми; с status — только этого статуса."""
+    async def list_filtered(
+        self,
+        status: UploadStatus | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> list[PriceListUpload]:
+        """Страница загрузок, свежие первыми; с status — только этого статуса."""
         stmt = (
             select(PriceListUpload)
             .options(selectinload(PriceListUpload.admin))
@@ -52,9 +57,22 @@ class PriceListRepository:
         )
         if status is not None:
             stmt = stmt.where(PriceListUpload.status == status)
+        if offset:
+            stmt = stmt.offset(offset)
+        if limit is not None:
+            stmt = stmt.limit(limit)
 
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def count_filtered(self, status: UploadStatus | None = None) -> int:
+        """Число загрузок с учётом фильтра по статусу (для пагинации)."""
+        stmt = select(func.count()).select_from(PriceListUpload)
+        if status is not None:
+            stmt = stmt.where(PriceListUpload.status == status)
+
+        result = await self._session.execute(stmt)
+        return int(result.scalar_one())
 
     async def count_by_status(self) -> dict[str, int]:
         """Сколько загрузок в каждом статусе (по всем загрузкам, без фильтра).

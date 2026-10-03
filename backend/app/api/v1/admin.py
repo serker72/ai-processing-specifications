@@ -192,12 +192,18 @@ async def list_pricelists(
     status_filter: Annotated[
         UploadStatus | None, Query(alias="status", description="Фильтр по статусу обработки")
     ] = None,
+    page: Annotated[int, Query(ge=1, description="Номер страницы")] = 1,
+    page_size: Annotated[int, Query(ge=1, le=200, description="Размер страницы")] = 50,
 ) -> PriceListListResponse:
-    """Загрузки прайс-листов со статусами обработки (свежие — первыми) и счётчиками статусов."""
+    """Страница загрузок прайс-листов со статусами (свежие — первыми) и счётчиками статусов."""
     await get_current_admin(request, settings, security_service, session_repository, user_repository)
 
-    uploads, counts = await price_list_service.list_uploads(status_filter)
-    return PriceListListResponse(uploads=uploads, counts=counts)
+    uploads, counts, total = await price_list_service.list_uploads(
+        status_filter, page=page, page_size=page_size
+    )
+    return PriceListListResponse(
+        uploads=uploads, counts=counts, total=total, page=page, page_size=page_size
+    )
 
 
 @admin_router.get(

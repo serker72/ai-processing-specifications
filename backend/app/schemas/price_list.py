@@ -25,6 +25,10 @@ class PriceListListResponse(BaseModel):
     # UploadStatus. Статусов с нулём загрузок здесь нет (добавляет сервис).
     counts: dict[str, int] = Field(default_factory=dict, description="Загрузок в каждом статусе")
 
+    total: int = Field(0, description="Загрузок с учётом фильтра (для пагинации)")
+    page: int = Field(1, description="Текущая страница")
+    page_size: int = Field(50, description="Размер страницы")
+
 
 class PriceListPreviewResponse(BaseModel):
     """Превью прайс-листа для подтверждения маппинга колонок.

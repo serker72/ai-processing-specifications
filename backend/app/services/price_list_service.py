@@ -40,15 +40,21 @@ class PriceListService:
         self._price_list_repo = price_list_repo
 
     async def list_uploads(
-        self, status: UploadStatus | None = None
-    ) -> tuple[list[PriceListUploadItem], dict[str, int]]:
-        """История загрузок прайс-листов (свежие — первыми) + счётчики по статусам.
+        self,
+        status: UploadStatus | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> tuple[list[PriceListUploadItem], dict[str, int], int]:
+        """Страница истории загрузок прайс-листов + счётчики по статусам + всего.
 
         Счётчики считаются по всем загрузкам, а не по отфильтрованным: иначе
         выбранный статус обнулил бы счётчики остальных. Статусы без загрузок
         возвращаются нулём, чтобы UI не дорисовывал пустые чипы сам.
+        `total` — число загрузок с учётом фильтра (для пагинации).
         """
-        uploads = await self._price_list_repo.list_filtered(status)
+        uploads = await self._price_list_repo.list_filtered(
+            status, offset=(page - 1) * page_size, limit=page_size
+        )
         items = [
             PriceListUploadItem(
                 id=str(upload.id),
@@ -62,7 +68,8 @@ class PriceListService:
 
         counts = {upload_status.value: 0 for upload_status in UploadStatus}
         counts.update(await self._price_list_repo.count_by_status())
-        return items, counts
+        total = await self._price_list_repo.count_filtered(status)
+        return items, counts, total
 
     async def get_preview(self, upload_id: str) -> dict[str, object]:
         """Превью прайс-листа из MinIO (50 строк) + сохранённый маппинг из БД.
