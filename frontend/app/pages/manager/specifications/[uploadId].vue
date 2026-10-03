@@ -37,7 +37,6 @@
     <!-- Коммерческое предложение: формирование и скачивание PDF -->
     <div class="proposal-panel">
       <h3>Коммерческое предложение</h3>
-      <p v-if="proposalError" class="text-danger">{{ proposalError }}</p>
       <template v-if="proposal">
         <p class="text-sm">
           <strong>{{ proposal.number }}</strong> ·
@@ -80,7 +79,7 @@
     </div>
 
     <!-- Таблица строк -->
-    <div v-if="rows.length" class="table-wrapper">
+    <div v-if="rows.length || showSkeleton" class="table-wrapper">
       <table class="data-table">
         <thead>
           <tr>
@@ -95,7 +94,8 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in rows" :key="row.id">
+          <CommonTableSkeleton v-if="showSkeleton" :columns="8" />
+          <tr v-for="row in rows" v-else :key="row.id">
             <td class="mono">{{ row.row_number }}</td>
             <td>{{ row.raw_name }}</td>
             <td>{{ row.quantity ?? '—' }}</td>
@@ -165,8 +165,6 @@
     <div v-else-if="!loading" class="empty-state">
       Строк спецификации нет
     </div>
-
-    <p v-if="error" class="text-danger">{{ error }}</p>
   </div>
 
   <!-- Диалог подтверждения: выбор из ТОП-N кандидатов -->
@@ -236,6 +234,7 @@ definePageMeta({ layout: 'workspace' })
 const { $api } = useNuxtApp() as any
 const route = useRoute()
 const uploadId = String(route.params.uploadId)
+const toast = useToast()
 
 // Данные загрузок
 interface SpecificationUploadDetail {
@@ -282,7 +281,8 @@ const page = ref(1)
 const pageSize = 50
 const total = ref(0)
 const loading = ref(false)
-const error = ref('')
+/** Скелетон вместо пустого состояния — только на первой загрузке страницы. */
+const showSkeleton = computed(() => loading.value && rows.value.length === 0)
 const sseMessages = ref<string[]>([])
 
 // Коммерческое предложение
@@ -302,7 +302,6 @@ interface ProposalItem {
 
 const proposal = ref<ProposalItem | null>(null)
 const proposalLoading = ref(false)
-const proposalError = ref('')
 
 // Диалог подтверждения
 const showConfirmDialog = ref(false)
@@ -349,13 +348,12 @@ async function loadUploadDetail() {
     uploadDetail.value = detail
     rowsByStatus.value = detail.rows_by_status || {}
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось загрузить спецификацию'
+    toast.fromError(err, 'Не удалось загрузить спецификацию')
   }
 }
 
 async function loadRows(p: number) {
   loading.value = true
-  error.value = ''
   try {
     const response = await $api(`/manager/specifications/${uploadId}/rows`, {
       query: { page: p, page_size: pageSize },
@@ -364,7 +362,7 @@ async function loadRows(p: number) {
     total.value = response.total
     page.value = p
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось загрузить строки'
+    toast.fromError(err, 'Не удалось загрузить строки')
   } finally {
     loading.value = false
   }
@@ -420,29 +418,28 @@ async function updateRowStatus(rowId: string, status: 'confirmed' | 'excluded', 
     await loadUploadDetail()
     await loadProposal()
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось обновить статус строки'
+    toast.fromError(err, 'Не удалось обновить статус строки')
   }
 }
 
 async function loadProposal() {
-  proposalError.value = ''
   try {
     proposal.value = await $api(`/manager/specifications/${uploadId}/proposal`)
   } catch (err: any) {
-    proposalError.value = err?.data?.detail || 'Не удалось загрузить данные КП'
+    toast.fromError(err, 'Не удалось загрузить данные КП')
   }
 }
 
 async function generateProposal(force: boolean) {
   proposalLoading.value = true
-  proposalError.value = ''
   try {
     proposal.value = await $api(`/manager/specifications/${uploadId}/proposal`, {
       method: 'POST',
       body: { force },
     })
+    toast.success('Коммерческое предложение сформировано')
   } catch (err: any) {
-    proposalError.value = err?.data?.detail || 'Не удалось сформировать КП'
+    toast.fromError(err, 'Не удалось сформировать КП')
   } finally {
     proposalLoading.value = false
   }
@@ -451,7 +448,6 @@ async function generateProposal(force: boolean) {
 async function downloadProposal() {
   if (!proposal.value) return
   proposalLoading.value = true
-  proposalError.value = ''
   try {
     const blob = await $api(`/manager/proposals/${proposal.value.id}/download`, {
       responseType: 'blob',
@@ -465,7 +461,7 @@ async function downloadProposal() {
     link.remove()
     URL.revokeObjectURL(url)
   } catch (err: any) {
-    proposalError.value = err?.data?.detail || 'Не удалось скачать КП'
+    toast.fromError(err, 'Не удалось скачать КП')
   } finally {
     proposalLoading.value = false
   }
@@ -483,8 +479,28 @@ onMounted(async () => {
   openStream(uploadId)
 })
 
+// Фолбэк-обновление, пока идёт обработка: SSE может оборваться, а статус
+// должен появиться. Тихо (без скелетона и тостов) опрашиваем детали.
+const POLL_INTERVAL_MS = 5000
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
+function pollProcessing() {
+  if (uploadDetail.value?.status === 'processing') {
+    loadUploadDetail()
+    loadRows(page.value)
+  }
+}
+
+onMounted(() => {
+  pollTimer = setInterval(pollProcessing, POLL_INTERVAL_MS)
+})
+
 onBeforeUnmount(() => {
   stopStream()
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
 })
 </script>
 

@@ -55,7 +55,7 @@
         </button>
       </div>
 
-      <table v-if="uploads.length" class="data-table">
+      <table v-if="uploads.length || showSkeleton" class="data-table">
         <thead>
           <tr>
             <th>Файл</th>
@@ -66,42 +66,63 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="upload in uploads" :key="upload.id">
-            <td :title="upload.id">{{ upload.filename }}</td>
-            <td>{{ upload.admin_email || '—' }}</td>
-            <td>{{ formatDateTime(upload.created_at) }}</td>
-            <td>
-              <span class="status-badge" :class="upload.status">{{ upload.status }}</span>
-            </td>
-            <td class="table-actions">
-              <NuxtLink
-                v-if="upload.status === 'mapping_predicted' || upload.status === 'failed'"
-                :to="`/admin/pricelists/${upload.id}`"
-                class="btn-action btn-mapping"
-              >
-                Маппинг
-              </NuxtLink>
-              <button
-                v-if="upload.status === 'failed'"
-                class="btn-action"
-                :disabled="retryingId === upload.id"
-                @click="retryUpload(upload.id)"
-              >
-                {{ retryingId === upload.id ? 'Запуск…' : 'Повторить' }}
-              </button>
-            </td>
-          </tr>
+          <template v-if="showSkeleton">
+            <CommonTableSkeleton :columns="5" />
+          </template>
+          <template v-else>
+            <tr v-for="upload in uploads" :key="upload.id">
+              <td :title="upload.id">{{ upload.filename }}</td>
+              <td>{{ upload.admin_email || '—' }}</td>
+              <td>{{ formatDateTime(upload.created_at) }}</td>
+              <td>
+                <span class="status-badge" :class="upload.status">{{ statusLabel(upload.status) }}</span>
+              </td>
+              <td class="table-actions">
+                <NuxtLink
+                  v-if="upload.status === 'mapping_predicted' || upload.status === 'failed'"
+                  :to="`/admin/pricelists/${upload.id}`"
+                  class="btn-action btn-mapping"
+                >
+                  Маппинг
+                </NuxtLink>
+                <button
+                  v-if="upload.status === 'failed'"
+                  class="btn-action"
+                  :disabled="retryingId === upload.id"
+                  @click="retryUpload(upload.id)"
+                >
+                  {{ retryingId === upload.id ? 'Запуск…' : 'Повторить' }}
+                </button>
+              </td>
+            </tr>
+          </template>
         </tbody>
       </table>
       <div v-else class="empty-state">
-        {{ isLoading ? 'Загрузка списка…' : 'Прайс-листы ещё не загружались' }}
+        {{ statusFilter ? 'Загрузок с этим статусом нет' : 'Прайс-листы ещё не загружались' }}
+      </div>
+
+      <div v-if="totalPages > 1" class="pager">
+        <button
+          class="btn-secondary"
+          :disabled="page <= 1 || isLoading"
+          @click="goToPage(page - 1)"
+        >
+          ← Назад
+        </button>
+        <span>Страница {{ page }} из {{ totalPages }}</span>
+        <button
+          class="btn-secondary"
+          :disabled="page >= totalPages || isLoading"
+          @click="goToPage(page + 1)"
+        >
+          Вперёд →
+        </button>
       </div>
     </div>
 
-    <p v-if="error" class="text-danger">{{ error }}</p>
-
     <div class="form-actions">
-      <button class="btn-secondary" :disabled="isLoading" @click="loadUploads">
+      <button class="btn-secondary" :disabled="isLoading" @click="loadUploads()">
         {{ isLoading ? 'Обновление...' : 'Обновить' }}
       </button>
     </div>
@@ -114,7 +135,7 @@
  * (GET /admin/pricelists). Статусы обработки приходят из backend —
  * pending / processing / mapping_predicted / completed / failed.
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 definePageMeta({ layout: 'workspace' })
 
@@ -127,7 +148,11 @@ interface PriceListUpload {
   created_at: string
 }
 
+const PAGE_SIZE = 20
+const POLL_INTERVAL_MS = 5000
+
 const { $api } = useNuxtApp() as any
+const toast = useToast()
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const selectedFile = ref<File | null>(null)
@@ -137,8 +162,15 @@ const uploadResult = ref<any>(null)
 const uploads = ref<PriceListUpload[]>([])
 const counts = ref<Record<string, number>>({})
 const statusFilter = ref('')
-const error = ref('')
 const retryingId = ref('')
+
+const page = ref(1)
+const total = ref(0)
+const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
+/** Скелетон вместо пустого состояния — только на первой загрузке страницы. */
+const showSkeleton = computed(() => isLoading.value && uploads.value.length === 0)
+
+let pollTimer: ReturnType<typeof setInterval> | null = null
 
 /** Подписи статусов UploadStatus для чипов фильтра. */
 const STATUS_LABELS: Record<string, string> = {
@@ -162,36 +194,65 @@ function formatDateTime(value: string) {
   return new Date(value).toLocaleString('ru-RU')
 }
 
-async function loadUploads() {
-  isLoading.value = true
-  error.value = ''
+/**
+ * Загрузить страницу истории. silent=true — фоновое обновление (polling):
+ * не показывает скелетон и не спамит тостами при временной ошибке.
+ */
+async function loadUploads(silent = false) {
+  if (!silent) {
+    isLoading.value = true
+  }
   try {
     const response = await $api('/admin/pricelists', {
       // Счётчики backend считает по всем загрузкам, фильтр — только по списку.
-      query: statusFilter.value ? { status: statusFilter.value } : {},
+      query: {
+        page: page.value,
+        page_size: PAGE_SIZE,
+        ...(statusFilter.value ? { status: statusFilter.value } : {}),
+      },
     })
     uploads.value = response.uploads
     counts.value = response.counts || {}
+    total.value = response.total ?? response.uploads.length
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось загрузить историю прайс-листов'
+    if (!silent) {
+      toast.fromError(err, 'Не удалось загрузить историю прайс-листов')
+    }
   } finally {
-    isLoading.value = false
+    if (!silent) {
+      isLoading.value = false
+    }
   }
 }
 
 function applyFilter(status: string) {
   statusFilter.value = status
+  page.value = 1
   loadUploads()
+}
+
+function goToPage(target: number) {
+  page.value = Math.min(Math.max(1, target), totalPages.value)
+  loadUploads()
+}
+
+/** Фоновое обновление, пока есть загрузки в обработке. */
+function pollProcessing() {
+  const hasProcessing =
+    (counts.value.processing ?? 0) > 0 || uploads.value.some((u) => u.status === 'processing')
+  if (hasProcessing) {
+    loadUploads(true)
+  }
 }
 
 async function retryUpload(id: string) {
   retryingId.value = id
-  error.value = ''
   try {
     await $api(`/admin/pricelists/${id}/retry`, { method: 'POST' })
+    toast.success('Обработка прайс-листа перезапущена')
     await loadUploads()
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось повторить обработку прайс-листа'
+    toast.fromError(err, 'Не удалось повторить обработку прайс-листа')
   } finally {
     retryingId.value = ''
   }
@@ -208,7 +269,6 @@ async function handleUpload() {
   }
 
   isUploading.value = true
-  error.value = ''
   uploadResult.value = null
   try {
     // FormData, а не JSON: backend читает файл как multipart (UploadFile).
@@ -219,13 +279,25 @@ async function handleUpload() {
     if (fileInput.value) {
       fileInput.value.value = ''
     }
+    toast.success('Прайс-лист загружен, ожидает подтверждения маппинга')
+    page.value = 1
     await loadUploads()
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось загрузить прайс-лист'
+    toast.fromError(err, 'Не удалось загрузить прайс-лист')
   } finally {
     isUploading.value = false
   }
 }
 
-onMounted(loadUploads)
+onMounted(() => {
+  loadUploads()
+  pollTimer = setInterval(pollProcessing, POLL_INTERVAL_MS)
+})
+
+onBeforeUnmount(() => {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+})
 </script>

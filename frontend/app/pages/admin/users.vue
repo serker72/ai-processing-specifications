@@ -9,7 +9,7 @@
     </div>
 
     <div class="table-wrapper">
-      <table v-if="users.length" class="data-table">
+      <table v-if="users.length || showSkeleton" class="data-table">
         <thead>
           <tr>
             <th>Email</th>
@@ -18,31 +18,34 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="user in users" :key="user.id">
-            <td>{{ user.email }}</td>
-            <td>
-              <!-- Роль меняется сразу; при ошибке список перезагружаем,
-                   чтобы выбор отражал реальное состояние backend -->
-              <select
-                v-model="user.role"
-                :disabled="isBusy(user) || user.id === currentUserId"
-                @change="updateRole(user)"
-              >
-                <option value="admin">Admin</option>
-                <option value="manager">Manager</option>
-              </select>
-              <span v-if="user.id === currentUserId" class="text-muted text-xs ml-2">это вы</span>
-            </td>
-            <td>{{ formatDate(user.created_at) }}</td>
-          </tr>
+          <template v-if="showSkeleton">
+            <CommonTableSkeleton :columns="3" />
+          </template>
+          <template v-else>
+            <tr v-for="user in users" :key="user.id">
+              <td>{{ user.email }}</td>
+              <td>
+                <!-- Роль меняется сразу; при ошибке список перезагружаем,
+                     чтобы выбор отражал реальное состояние backend -->
+                <select
+                  v-model="user.role"
+                  :disabled="isBusy(user) || user.id === currentUserId"
+                  @change="updateRole(user)"
+                >
+                  <option value="admin">Admin</option>
+                  <option value="manager">Manager</option>
+                </select>
+                <span v-if="user.id === currentUserId" class="text-muted text-xs ml-2">это вы</span>
+              </td>
+              <td>{{ formatDate(user.created_at) }}</td>
+            </tr>
+          </template>
         </tbody>
       </table>
       <div v-else class="empty-state">
-        {{ isLoading ? 'Загрузка списка…' : 'Нет данных о пользователях' }}
+        Нет данных о пользователях
       </div>
     </div>
-
-    <p v-if="error" class="text-danger">{{ error }}</p>
   </div>
 </template>
 
@@ -68,11 +71,13 @@ interface AdminUser {
 
 const { user: currentUser } = useAuth()
 const { $api } = useNuxtApp() as any
+const toast = useToast()
 
 const users = ref<AdminUser[]>([])
 const isLoading = ref(false)
-const error = ref('')
 const busyIds = ref<string[]>([])
+/** Скелетон вместо пустого состояния — только на первой загрузке страницы. */
+const showSkeleton = computed(() => isLoading.value && users.value.length === 0)
 
 const currentUserId = computed(() => currentUser.value?.id ?? '')
 
@@ -86,12 +91,11 @@ function formatDate(value: string) {
 
 async function loadUsers() {
   isLoading.value = true
-  error.value = ''
   try {
     const response = await $api('/admin/users')
     users.value = response.users
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось загрузить список пользователей'
+    toast.fromError(err, 'Не удалось загрузить список пользователей')
   } finally {
     isLoading.value = false
   }
@@ -99,15 +103,15 @@ async function loadUsers() {
 
 async function updateRole(user: AdminUser) {
   busyIds.value = [...busyIds.value, user.id]
-  error.value = ''
   try {
     const updated = await $api(`/admin/users/${user.id}`, {
       method: 'PATCH',
       body: { role: user.role },
     })
     user.role = updated.role
+    toast.success('Роль обновлена')
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось изменить роль'
+    toast.fromError(err, 'Не удалось изменить роль')
     await loadUsers()
   } finally {
     busyIds.value = busyIds.value.filter((id) => id !== user.id)

@@ -9,7 +9,7 @@
     </div>
 
     <div class="table-wrapper">
-      <table v-if="sessions.length" class="data-table">
+      <table v-if="sessions.length || showSkeleton" class="data-table">
         <thead>
           <tr>
             <th>Пользователь</th>
@@ -19,30 +19,34 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="session in sessions" :key="rowKey(session)">
-            <td>{{ session.email || session.user_id }}</td>
-            <td class="mono" :title="session.fingerprint_hash">
-              {{ shortHash(session.fingerprint_hash) }}
-            </td>
-            <td>{{ formatDateTime(session.expires_at) }}</td>
-            <td>
-              <button
-                class="btn-revoke"
-                :disabled="busyKeys.includes(rowKey(session))"
-                @click="revoke(session)"
-              >
-                Отозвать
-              </button>
-            </td>
-          </tr>
+          <template v-if="showSkeleton">
+            <CommonTableSkeleton :columns="4" />
+          </template>
+          <template v-else>
+            <tr v-for="session in sessions" :key="rowKey(session)">
+              <td>{{ session.email || session.user_id }}</td>
+              <td class="mono" :title="session.fingerprint_hash">
+                {{ shortHash(session.fingerprint_hash) }}
+              </td>
+              <td>{{ formatDateTime(session.expires_at) }}</td>
+              <td>
+                <button
+                  class="btn-revoke"
+                  :disabled="busyKeys.includes(rowKey(session))"
+                  @click="revoke(session)"
+                >
+                  Отозвать
+                </button>
+              </td>
+            </tr>
+          </template>
         </tbody>
       </table>
       <div v-else class="empty-state">
-        {{ isLoading ? 'Загрузка списка…' : 'Активных сессий нет' }}
+        Активных сессий нет
       </div>
     </div>
 
-    <p v-if="error" class="text-danger">{{ error }}</p>
     <p class="text-muted text-sm mt-4">
       Доступен refresh-токен сессии: после отзыва обновить токены не получится,
       а текущий access-токен доживёт до конца своего короткого срока.
@@ -68,11 +72,13 @@ interface SessionRow {
 }
 
 const { $api } = useNuxtApp() as any
+const toast = useToast()
 
 const sessions = ref<SessionRow[]>([])
 const isLoading = ref(false)
-const error = ref('')
 const busyKeys = ref<string[]>([])
+/** Скелетон вместо пустого состояния — только на первой загрузке страницы. */
+const showSkeleton = computed(() => isLoading.value && sessions.value.length === 0)
 
 function rowKey(session: SessionRow) {
   return `${session.user_id}:${session.fingerprint_hash}`
@@ -88,12 +94,11 @@ function formatDateTime(value: string) {
 
 async function loadSessions() {
   isLoading.value = true
-  error.value = ''
   try {
     const response = await $api('/admin/sessions')
     sessions.value = response.sessions
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось загрузить список сессий'
+    toast.fromError(err, 'Не удалось загрузить список сессий')
   } finally {
     isLoading.value = false
   }
@@ -102,14 +107,14 @@ async function loadSessions() {
 async function revoke(session: SessionRow) {
   const key = rowKey(session)
   busyKeys.value = [...busyKeys.value, key]
-  error.value = ''
   try {
     await $api(`/admin/sessions/${session.user_id}/${session.fingerprint_hash}`, {
       method: 'DELETE',
     })
     sessions.value = sessions.value.filter((item) => rowKey(item) !== key)
+    toast.success('Сессия отозвана')
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось отозвать сессию'
+    toast.fromError(err, 'Не удалось отозвать сессию')
   } finally {
     busyKeys.value = busyKeys.value.filter((item) => item !== key)
   }

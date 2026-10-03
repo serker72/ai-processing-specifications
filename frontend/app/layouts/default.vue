@@ -33,6 +33,9 @@
     <main class="py-10">
       <NuxtPage />
     </main>
+
+    <!-- Хост тостов: страница входа тоже показывает ошибки входа тостами -->
+    <CommonToastHost />
   </div>
 </template>
 

@@ -22,7 +22,7 @@
     </div>
 
     <div class="table-wrapper">
-      <table v-if="items.length" class="data-table">
+      <table v-if="items.length || showSkeleton" class="data-table">
         <thead>
           <tr>
             <th>Артикул</th>
@@ -34,55 +34,58 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="item in items" :key="item.id">
-            <td class="mono">{{ item.sku }}</td>
-            <td>
-              <input v-if="editingId === item.id" v-model="editForm.name" class="form-control" />
-              <span v-else>{{ item.name }}</span>
-            </td>
-            <td>
-              <input v-if="editingId === item.id" v-model="editForm.unit" class="form-control" />
-              <span v-else>{{ item.unit || '—' }}</span>
-            </td>
-            <td>
-              <input
-                v-if="editingId === item.id"
-                v-model="editForm.price"
-                class="form-control"
-                type="number"
-                min="0"
-                step="0.01"
-              />
-              <span v-else>{{ formatPrice(item.price) }}</span>
-            </td>
-            <td>{{ formatDate(item.created_at) }}</td>
-            <td>
-              <template v-if="editingId === item.id">
-                <button class="btn-icon" :disabled="isSaving" title="Сохранить" @click="saveItem(item)">
-                  💾
+          <template v-if="showSkeleton">
+            <CommonTableSkeleton :columns="6" />
+          </template>
+          <template v-else>
+            <tr v-for="item in items" :key="item.id">
+              <td class="mono">{{ item.sku }}</td>
+              <td>
+                <input v-if="editingId === item.id" v-model="editForm.name" class="form-control" />
+                <span v-else>{{ item.name }}</span>
+              </td>
+              <td>
+                <input v-if="editingId === item.id" v-model="editForm.unit" class="form-control" />
+                <span v-else>{{ item.unit || '—' }}</span>
+              </td>
+              <td>
+                <input
+                  v-if="editingId === item.id"
+                  v-model="editForm.price"
+                  class="form-control"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                />
+                <span v-else>{{ formatPrice(item.price) }}</span>
+              </td>
+              <td>{{ formatDate(item.created_at) }}</td>
+              <td>
+                <template v-if="editingId === item.id">
+                  <button class="btn-icon" :disabled="isSaving" title="Сохранить" @click="saveItem(item)">
+                    💾
+                  </button>
+                  <button
+                    class="btn-icon"
+                    :disabled="isSaving"
+                    title="Отмена"
+                    @click="editingId = null"
+                  >
+                    ✖️
+                  </button>
+                </template>
+                <button v-else class="btn-icon" title="Редактировать" @click="startEdit(item)">
+                  ✏️
                 </button>
-                <button
-                  class="btn-icon"
-                  :disabled="isSaving"
-                  title="Отмена"
-                  @click="editingId = null"
-                >
-                  ✖️
-                </button>
-              </template>
-              <button v-else class="btn-icon" title="Редактировать" @click="startEdit(item)">
-                ✏️
-              </button>
-            </td>
-          </tr>
+              </td>
+            </tr>
+          </template>
         </tbody>
       </table>
       <div v-else class="empty-state">
-        {{ isLoading ? 'Загрузка списка…' : search ? 'Ничего не найдено' : 'Каталог пуст' }}
+        {{ search ? 'Ничего не найдено' : 'Каталог пуст' }}
       </div>
     </div>
-
-    <p v-if="error" class="text-danger">{{ error }}</p>
 
     <div class="form-actions flex flex-wrap items-center gap-2">
       <button class="btn-secondary" :disabled="isLoading || page <= 1" @click="goToPage(page - 1)">
@@ -126,6 +129,7 @@ interface CatalogItem {
 const PAGE_SIZE = 50
 
 const { $api } = useNuxtApp() as any
+const toast = useToast()
 
 const items = ref<CatalogItem[]>([])
 const total = ref(0)
@@ -133,7 +137,8 @@ const page = ref(1)
 const search = ref('')
 const searchQuery = ref('')
 const isLoading = ref(false)
-const error = ref('')
+/** Скелетон вместо пустого состояния — только на первой загрузке страницы. */
+const showSkeleton = computed(() => isLoading.value && items.value.length === 0)
 
 // Правка позиции в таблице: id редактируемой строки и её новые значения
 const editingId = ref<string | null>(null)
@@ -152,7 +157,6 @@ function formatDate(value: string) {
 
 async function loadCatalog() {
   isLoading.value = true
-  error.value = ''
   try {
     const response = await $api('/admin/catalog', {
       query: {
@@ -164,7 +168,7 @@ async function loadCatalog() {
     items.value = response.items
     total.value = response.total
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось загрузить каталог'
+    toast.fromError(err, 'Не удалось загрузить каталог')
   } finally {
     isLoading.value = false
   }
@@ -198,18 +202,17 @@ function startEdit(item: CatalogItem) {
 async function saveItem(item: CatalogItem) {
   const name = editForm.value.name.trim()
   if (!name) {
-    error.value = 'Наименование не может быть пустым'
+    toast.error('Наименование не может быть пустым')
     return
   }
 
   const price = editForm.value.price === '' ? null : Number(editForm.value.price)
   if (price !== null && (!Number.isFinite(price) || price < 0)) {
-    error.value = 'Цена должна быть неотрицательным числом'
+    toast.error('Цена должна быть неотрицательным числом')
     return
   }
 
   isSaving.value = true
-  error.value = ''
   try {
     const updated = await $api(`/admin/catalog/${item.id}`, {
       method: 'PATCH',
@@ -223,8 +226,9 @@ async function saveItem(item: CatalogItem) {
     item.unit = updated.unit
     item.price = updated.price
     editingId.value = null
+    toast.success('Позиция каталога сохранена')
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось сохранить изменения'
+    toast.fromError(err, 'Не удалось сохранить изменения')
   } finally {
     isSaving.value = false
   }

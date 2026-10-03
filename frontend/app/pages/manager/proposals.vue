@@ -12,7 +12,7 @@
     </div>
 
     <div class="table-wrapper">
-      <table v-if="proposals.length" class="data-table">
+      <table v-if="proposals.length || showSkeleton" class="data-table">
         <thead>
           <tr>
             <th>Номер</th>
@@ -25,43 +25,45 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="item in proposals" :key="item.id">
-            <td class="mono">{{ item.number }}</td>
-            <td>{{ item.client_name ?? '—' }}</td>
-            <td :title="item.upload_id">{{ item.filename ?? '—' }}</td>
-            <td>{{ formatDateTime(item.created_at) }}</td>
-            <td>{{ item.documents_count }}</td>
-            <td>
-              <span v-if="item.needs_regeneration" class="status-badge failed">
-                Данные изменились
-              </span>
-              <span v-else class="status-badge completed">Актуально</span>
-            </td>
-            <td class="table-actions">
-              <button
-                class="btn-action btn-sm"
-                :disabled="downloadingId === item.id"
-                @click="download(item)"
-              >
-                {{ downloadingId === item.id ? 'Скачивание…' : 'Скачать PDF' }}
-              </button>
-              <NuxtLink
-                :to="`/manager/specifications/${item.upload_id}`"
-                class="btn-secondary btn-sm btn-link"
-              >
-                Открыть
-              </NuxtLink>
-            </td>
-          </tr>
+          <template v-if="showSkeleton">
+            <CommonTableSkeleton :columns="7" />
+          </template>
+          <template v-else>
+            <tr v-for="item in proposals" :key="item.id">
+              <td class="mono">{{ item.number }}</td>
+              <td>{{ item.client_name ?? '—' }}</td>
+              <td :title="item.upload_id">{{ item.filename ?? '—' }}</td>
+              <td>{{ formatDateTime(item.created_at) }}</td>
+              <td>{{ item.documents_count }}</td>
+              <td>
+                <span v-if="item.needs_regeneration" class="status-badge failed">
+                  Данные изменились
+                </span>
+                <span v-else class="status-badge completed">Актуально</span>
+              </td>
+              <td class="table-actions">
+                <button
+                  class="btn-action btn-sm"
+                  :disabled="downloadingId === item.id"
+                  @click="download(item)"
+                >
+                  {{ downloadingId === item.id ? 'Скачивание…' : 'Скачать PDF' }}
+                </button>
+                <NuxtLink
+                  :to="`/manager/specifications/${item.upload_id}`"
+                  class="btn-secondary btn-sm btn-link"
+                >
+                  Открыть
+                </NuxtLink>
+              </td>
+            </tr>
+          </template>
         </tbody>
       </table>
-      <div v-else-if="!isLoading" class="empty-state">
+      <div v-else class="empty-state">
         Коммерческие предложения ещё не формировались
       </div>
-      <div v-else class="empty-state">Загрузка списка…</div>
     </div>
-
-    <p v-if="error" class="text-danger">{{ error }}</p>
   </div>
 </template>
 
@@ -89,11 +91,13 @@ interface ProposalItem {
 }
 
 const { $api } = useNuxtApp() as any
+const toast = useToast()
 
 const proposals = ref<ProposalItem[]>([])
 const isLoading = ref(false)
 const downloadingId = ref('')
-const error = ref('')
+/** Скелетон вместо пустого состояния — только на первой загрузке страницы. */
+const showSkeleton = computed(() => isLoading.value && proposals.value.length === 0)
 
 function formatDateTime(value: string) {
   return new Date(value).toLocaleString('ru-RU')
@@ -101,12 +105,11 @@ function formatDateTime(value: string) {
 
 async function loadProposals() {
   isLoading.value = true
-  error.value = ''
   try {
     const response = await $api('/manager/proposals')
     proposals.value = response.proposals
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось загрузить список КП'
+    toast.fromError(err, 'Не удалось загрузить список КП')
   } finally {
     isLoading.value = false
   }
@@ -114,7 +117,6 @@ async function loadProposals() {
 
 async function download(item: ProposalItem) {
   downloadingId.value = item.id
-  error.value = ''
   try {
     const blob = await $api(`/manager/proposals/${item.id}/download`, {
       responseType: 'blob',
@@ -128,7 +130,7 @@ async function download(item: ProposalItem) {
     link.remove()
     URL.revokeObjectURL(url)
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось скачать КП'
+    toast.fromError(err, 'Не удалось скачать КП')
   } finally {
     downloadingId.value = ''
   }

@@ -674,3 +674,101 @@ a.btn-mapping:hover {
   outline: 2px solid var(--app-accent);
   outline-offset: 1px;
 }
+
+/* ── Тосты ────────────────────────────────────────────────────────────────────
+   Всплывающие уведомления вместо текстовых error-блоков. Хост один на
+   приложение (CommonToastHost в layout'ах), позиция — правый верхний угол. */
+.toast-host {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  max-width: 380px;
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--app-border);
+  border-left-width: 4px;
+  border-radius: 8px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  box-shadow: 0 6px 20px rgb(15 23 42 / 0.15);
+  font-size: 13px;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.toast-message {
+  flex: 1;
+  word-break: break-word;
+}
+
+.toast-close {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--app-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* Цветовая полоса слева кодирует тип уведомления. */
+.toast-success {
+  border-left-color: var(--app-success);
+}
+
+.toast-error {
+  border-left-color: var(--app-danger);
+}
+
+.toast-info {
+  border-left-color: var(--app-accent);
+}
+
+.toast-enter-active,
+.toast-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.toast-enter-from,
+.toast-leave-to {
+  opacity: 0;
+  transform: translateX(16px);
+}
+
+/* ── Скелетоны таблиц ─────────────────────────────────────────────────────────
+   Плейсхолдер-строки на время загрузки: снимают «прыжок» пустого состояния. */
+.skeleton-line {
+  display: block;
+  height: 12px;
+  width: 100%;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    var(--app-surface-muted) 25%,
+    color-mix(in srgb, var(--app-border) 60%, transparent) 37%,
+    var(--app-surface-muted) 63%
+  );
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease infinite;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+
+  100% {
+    background-position: 0 50%;
+  }
+}

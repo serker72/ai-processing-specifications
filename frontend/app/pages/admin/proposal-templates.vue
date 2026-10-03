@@ -55,7 +55,7 @@
     <!-- Список шаблонов -->
     <div class="table-wrapper">
       <h3>Список шаблонов</h3>
-      <table class="data-table">
+      <table v-if="templates.length || showSkeleton" class="data-table">
         <thead>
           <tr>
             <th>Название</th>
@@ -65,50 +65,53 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="template in templates" :key="template.id">
-            <td>
-              <!-- Режим правки: название и дата начала меняются PATCH-запросом -->
-              <input v-if="editingId === template.id" v-model="editForm.name" class="form-control" />
-              <span v-else>{{ template.name }}</span>
-            </td>
-            <td>
-              <input
-                v-if="editingId === template.id"
-                v-model="editForm.start_date"
-                class="form-control"
-                type="date"
-              />
-              <span v-else>{{ formatDate(template.start_date) }}</span>
-            </td>
-            <td>
-              <span v-if="template.id === currentTemplateId" class="status-badge current">
-                Текущий
-              </span>
-              <span v-else class="status-badge upcoming">
-                Предстоящий
-              </span>
-            </td>
-            <td>
-              <template v-if="editingId === template.id">
-                <button class="btn-icon" :disabled="isSaving" @click="saveTemplate(template)">
-                  💾
-                </button>
-                <button class="btn-icon" :disabled="isSaving" @click="editingId = null">✖️</button>
-              </template>
-              <template v-else>
-                <button class="btn-icon" @click="startEdit(template)">✏️</button>
-                <button class="btn-icon danger" @click="deleteTemplate(template.id)">🗑️</button>
-              </template>
-            </td>
-          </tr>
+          <template v-if="showSkeleton">
+            <CommonTableSkeleton :columns="4" />
+          </template>
+          <template v-else>
+            <tr v-for="template in templates" :key="template.id">
+              <td>
+                <!-- Режим правки: название и дата начала меняются PATCH-запросом -->
+                <input v-if="editingId === template.id" v-model="editForm.name" class="form-control" />
+                <span v-else>{{ template.name }}</span>
+              </td>
+              <td>
+                <input
+                  v-if="editingId === template.id"
+                  v-model="editForm.start_date"
+                  class="form-control"
+                  type="date"
+                />
+                <span v-else>{{ formatDate(template.start_date) }}</span>
+              </td>
+              <td>
+                <span v-if="template.id === currentTemplateId" class="status-badge current">
+                  Текущий
+                </span>
+                <span v-else class="status-badge upcoming">
+                  Предстоящий
+                </span>
+              </td>
+              <td>
+                <template v-if="editingId === template.id">
+                  <button class="btn-icon" :disabled="isSaving" @click="saveTemplate(template)">
+                    💾
+                  </button>
+                  <button class="btn-icon" :disabled="isSaving" @click="editingId = null">✖️</button>
+                </template>
+                <template v-else>
+                  <button class="btn-icon" @click="startEdit(template)">✏️</button>
+                  <button class="btn-icon danger" @click="deleteTemplate(template.id)">🗑️</button>
+                </template>
+              </td>
+            </tr>
+          </template>
         </tbody>
       </table>
-      <div v-if="!templates.length" class="empty-state">
-        {{ isLoading ? 'Загрузка списка…' : 'Нет загруженных шаблонов' }}
+      <div v-else class="empty-state">
+        Нет загруженных шаблонов
       </div>
     </div>
-
-    <p v-if="error" class="text-danger">{{ error }}</p>
   </div>
 </template>
 
@@ -123,7 +126,8 @@ const isUploading = ref(false)
 const isLoading = ref(false)
 const templates = ref<any[]>([])
 const currentTemplateId = ref<string | null>(null)
-const error = ref('')
+/** Скелетон вместо пустого состояния — только на первой загрузке страницы. */
+const showSkeleton = computed(() => isLoading.value && templates.value.length === 0)
 
 // Правка шаблона в таблице: id редактируемой строки и её новые значения
 const editingId = ref<string | null>(null)
@@ -132,6 +136,7 @@ const editForm = ref({ name: '', start_date: '' })
 
 // $api — API-клиент из plugins/api.ts: credentials и повтор запроса после 401
 const { $api } = useNuxtApp() as any
+const toast = useToast()
 
 const form = ref({
   name: '',
@@ -212,10 +217,11 @@ async function handleUpload() {
 
     // Список перечитываем: backend возвращает только созданный объект,
     // а порядок и «текущий» шаблон считает loadTemplates()
+    toast.success('Шаблон загружен')
     await loadTemplates()
 
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось загрузить шаблон'
+    toast.fromError(err, 'Не удалось загрузить шаблон')
   } finally {
     isUploading.value = false
   }
@@ -223,13 +229,12 @@ async function handleUpload() {
 
 async function loadTemplates() {
   isLoading.value = true
-  error.value = ''
   try {
     const response = await $api('/admin/proposal-templates')
     templates.value = response.templates
     updateCurrentTemplate()
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось загрузить список шаблонов'
+    toast.fromError(err, 'Не удалось загрузить список шаблонов')
   } finally {
     isLoading.value = false
   }
@@ -258,12 +263,11 @@ function startEdit(template: any) {
 
 async function saveTemplate(template: any) {
   if (!editForm.value.name || !editForm.value.start_date) {
-    error.value = 'Укажите название и дату начала'
+    toast.error('Укажите название и дату начала')
     return
   }
 
   isSaving.value = true
-  error.value = ''
   try {
     const updated = await $api(`/admin/proposal-templates/${template.id}`, {
       method: 'PATCH',
@@ -273,8 +277,9 @@ async function saveTemplate(template: any) {
     template.start_date = updated.start_date
     editingId.value = null
     updateCurrentTemplate()
+    toast.success('Шаблон обновлён')
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось обновить шаблон'
+    toast.fromError(err, 'Не удалось обновить шаблон')
   } finally {
     isSaving.value = false
   }
@@ -282,15 +287,16 @@ async function saveTemplate(template: any) {
 
 async function deleteTemplate(templateId: string) {
   if (!confirm('Удалить шаблон?')) return
-  
+
   try {
     await $api(`/admin/proposal-templates/${templateId}`, { method: 'DELETE' })
-    
+
     // Удаляем из списка
     templates.value = templates.value.filter(t => t.id !== templateId)
     updateCurrentTemplate()
+    toast.success('Шаблон удалён')
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось удалить шаблон'
+    toast.fromError(err, 'Не удалось удалить шаблон')
   }
 }
 

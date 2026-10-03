@@ -41,6 +41,9 @@
     <main class="content">
       <slot />
     </main>
+
+    <!-- Единый хост тостов: уведомления доступны на всех страницах кабинета -->
+    <CommonToastHost />
   </div>
 </template>
 

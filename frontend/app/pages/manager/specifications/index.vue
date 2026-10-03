@@ -41,7 +41,6 @@
       <h3>Результат загрузки:</h3>
       <pre>{{ JSON.stringify(uploadResult, null, 2) }}</pre>
     </div>
-    <p v-if="error" class="text-danger">{{ error }}</p>
     <div v-if="sseMessages.length > 0" class="sse-log">
       <h3>События обработки:</h3>
       <ul>
@@ -77,7 +76,6 @@
           <label for="new-client-phone">Телефон</label>
           <input id="new-client-phone" v-model="clientForm.phone" class="form-control" type="text" />
         </div>
-        <p v-if="clientError" class="text-danger">{{ clientError }}</p>
         <div class="form-actions">
           <button
             class="btn-upload"
@@ -109,10 +107,10 @@ interface Client {
 const { init: initFingerprint } = useFingerprint()
 // $api — API-клиент из plugins/api.ts: credentials и повтор запроса после 401
 const { $api } = useNuxtApp() as any
+const toast = useToast()
 const fileInput = ref<any>(null)
 const isUploading = ref(false)
 const uploadResult = ref<any>(null)
-const error = ref('')
 const sseMessages = ref<string[]>([])
 
 const clients = ref<Client[]>([])
@@ -121,7 +119,6 @@ const selectedClientId = ref('')
 // Создание клиента в модальном окне
 const isClientModalOpen = ref(false)
 const isCreatingClient = ref(false)
-const clientError = ref('')
 const clientForm = ref({
   name: '',
   inn: '',
@@ -165,12 +162,11 @@ async function loadClients() {
     const response = await $api('/manager/clients')
     clients.value = response.clients
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось загрузить список клиентов'
+    toast.fromError(err, 'Не удалось загрузить список клиентов')
   }
 }
 
 function openClientModal() {
-  clientError.value = ''
   clientForm.value = {
     name: '',
     inn: '',
@@ -188,14 +184,14 @@ function closeClientModal() {
 
 async function createClient() {
   isCreatingClient.value = true
-  clientError.value = ''
   try {
     const created = await $api('/manager/clients', { method: 'POST', body: clientForm.value })
     clients.value.push({ id: created.id, name: created.name, inn: created.inn })
     selectedClientId.value = created.id
     isClientModalOpen.value = false
+    toast.success('Клиент создан')
   } catch (err: any) {
-    clientError.value = err?.data?.detail || 'Не удалось создать клиента'
+    toast.fromError(err, 'Не удалось создать клиента')
   } finally {
     isCreatingClient.value = false
   }
@@ -203,7 +199,7 @@ async function createClient() {
 
 function handleUpload() {
   if (!selectedClientId.value) {
-    error.value = 'Сначала выберите клиента'
+    toast.error('Сначала выберите клиента')
     return
   }
   fileInput.value?.click()
@@ -217,7 +213,6 @@ async function handleFileSelect(event: Event) {
   isUploading.value = true
   uploadResult.value = null
   sseMessages.value = []
-  error.value = ''
 
   try {
     const formData = new FormData()
@@ -231,11 +226,12 @@ async function handleFileSelect(event: Event) {
     })
 
     uploadResult.value = response
+    toast.success('Спецификация загружена, начата обработка')
 
     // Подписываемся на SSE-поток обработки загрузки
     openStream(response.upload_id)
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось загрузить спецификацию'
+    toast.fromError(err, 'Не удалось загрузить спецификацию')
   } finally {
     isUploading.value = false
     // Сброс input, чтобы повторный выбор того же файла снова сработал

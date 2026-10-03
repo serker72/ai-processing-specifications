@@ -89,9 +89,6 @@
         {{ isSaving ? 'Сохранение…' : 'Сохранить' }}
       </button>
     </div>
-
-    <p v-if="error" class="text-danger">{{ error }}</p>
-    <p v-if="saved" class="text-muted">Настройки сохранены</p>
   </div>
 </template>
 
@@ -122,6 +119,7 @@ interface AppSettings {
 }
 
 const { $api } = useNuxtApp() as any
+const toast = useToast()
 
 const form = ref<AppSettings>({
   seller_name: '',
@@ -142,17 +140,14 @@ const form = ref<AppSettings>({
 
 const isLoading = ref(false)
 const isSaving = ref(false)
-const error = ref('')
-const saved = ref(false)
 
 async function loadSettings() {
   isLoading.value = true
-  error.value = ''
   try {
     const response = await $api('/admin/settings')
     form.value = { ...form.value, ...response }
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось загрузить настройки'
+    toast.fromError(err, 'Не удалось загрузить настройки')
   } finally {
     isLoading.value = false
   }
@@ -160,14 +155,12 @@ async function loadSettings() {
 
 async function save() {
   isSaving.value = true
-  error.value = ''
-  saved.value = false
   try {
     const response = await $api('/admin/settings', { method: 'PATCH', body: form.value })
     form.value = { ...form.value, ...response }
-    saved.value = true
+    toast.success('Настройки сохранены')
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось сохранить настройки'
+    toast.fromError(err, 'Не удалось сохранить настройки')
   } finally {
     isSaving.value = false
   }

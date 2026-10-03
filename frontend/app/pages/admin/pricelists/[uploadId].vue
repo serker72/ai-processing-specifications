@@ -114,8 +114,6 @@
         </span>
       </div>
     </template>
-
-    <p v-if="error" class="text-danger mt-2">{{ error }}</p>
   </div>
 </template>
 
@@ -153,12 +151,12 @@ const SAMPLE_SIZE = 3
 const { $api } = useNuxtApp() as any
 const route = useRoute()
 const uploadId = String(route.params.uploadId)
+const toast = useToast()
 
 const preview = ref<PriceListPreview | null>(null)
 const assignments = ref<Record<string, ColumnAssignment>>({})
 const isLoading = ref(false)
 const isSaving = ref(false)
-const error = ref('')
 
 const isEditable = computed(() =>
   Boolean(preview.value && EDITABLE_STATUSES.includes(preview.value.status)),
@@ -224,13 +222,12 @@ function sampleValues(header: string): string {
 
 async function loadPreview() {
   isLoading.value = true
-  error.value = ''
   try {
     const response: PriceListPreview = await $api(`/admin/pricelists/${uploadId}/preview`)
     preview.value = response
     assignments.value = assignmentsFromMapping(response.column_mapping, response.headers)
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось загрузить превью прайс-листа'
+    toast.fromError(err, 'Не удалось загрузить превью прайс-листа')
   } finally {
     isLoading.value = false
   }
@@ -241,15 +238,15 @@ async function saveMapping() {
     return
   }
   isSaving.value = true
-  error.value = ''
   try {
     await $api(`/admin/pricelists/${uploadId}/confirm`, {
       method: 'POST',
       body: payload.value,
     })
+    toast.success('Маппинг подтверждён, запущена обработка прайс-листа')
     await navigateTo('/admin/pricelists')
   } catch (err: any) {
-    error.value = err?.data?.detail || 'Не удалось подтвердить маппинг'
+    toast.fromError(err, 'Не удалось подтвердить маппинг')
   } finally {
     isSaving.value = false
   }

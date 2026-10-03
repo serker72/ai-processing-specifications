@@ -25,9 +25,7 @@
       <button type="submit" class="btn-submit w-full" :disabled="isLoading">
         {{ isLoading ? 'Вход...' : 'Войти' }}
       </button>
-      <p v-if="error" class="text-danger mt-2">{{ error }}</p>
       <p v-if="fingerprintStatus === 'loading'" class="text-muted mt-2 italic">Генерация fingerprint...</p>
-      <p v-if="fingerprintError" class="text-danger mt-2">{{ fingerprintError.message }}</p>
     </form>
   </div>
 </template>
@@ -39,7 +37,8 @@ import { useAuth } from '~/composables/useAuth'
 
 const email = ref('')
 const password = ref('')
-const { login, isLoading, error } = useAuth()
+const { login, isLoading } = useAuth()
+const toast = useToast()
 
 // Fingerprint генерирует ThumbmarkJS (client-only плагин), храним его в плагине
 const { isLoading: fpLoading, error: fingerprintError, init } = useFingerprint()
@@ -49,6 +48,7 @@ async function handleLogin() {
   // Дожидаемся отпечатка: запрос с пустым fingerprint backend отклонит с 422
   const fingerprint = await init()
   if (!fingerprint) {
+    toast.error(fingerprintError.value?.message || 'Не удалось определить устройство')
     return
   }
 
@@ -57,6 +57,8 @@ async function handleLogin() {
   if (result.success) {
     // Домашний маршрут роли (useAuth.ROLE_HOME): админ и менеджер видят свой раздел
     navigateTo(result.home)
+  } else {
+    toast.error(result.error || 'Ошибка авторизации')
   }
 }
 </script>
