@@ -12,6 +12,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from app.core.logging_config import upload_id_var
 from app.schemas.sse_events import ProgressEvent, RowMatchEvent
 from app.worker import celery_app
 
@@ -83,6 +84,7 @@ def vectorize_catalog(self: Any, upload_id: str) -> dict:
         from app.services.embedding_service import EmbeddingService
         from app.services.price_list_service import PriceListService
 
+        logger.info("Векторизация каталога: старт")
         container = create_container()
         async with container() as c:
             embedding_svc = await c.get(EmbeddingService)
@@ -94,8 +96,10 @@ def vectorize_catalog(self: Any, upload_id: str) -> dict:
 
                 upload = await price_list_repo.get_by_id(UUID(upload_id))
                 if upload is None:
+                    logger.warning("Векторизация каталога: загрузка не найдена")
                     return {"error": "upload not found", "upload_id": upload_id}
                 if not upload.column_mapping:
+                    logger.warning("Векторизация каталога: маппинг колонок не подтверждён")
                     return {"error": "no column_mapping", "upload_id": upload_id}
 
                 file_key = upload.file_key
@@ -107,6 +111,7 @@ def vectorize_catalog(self: Any, upload_id: str) -> dict:
                 try:
                     rows = await price_list_svc.parse_pricelist(file_key, column_mapping)
                     total = len(rows)
+                    logger.info("Векторизация каталога: прочитано строк — %d", total)
 
                     for i in range(0, total, BATCH_SIZE):
                         batch = rows[i : i + BATCH_SIZE]
@@ -125,17 +130,24 @@ def vectorize_catalog(self: Any, upload_id: str) -> dict:
                         # а не падает на уникальном индексе (sku, name)
                         await catalog_repo.upsert_batch(items)
                         await session.commit()
+                        logger.info("Векторизация каталога: обработано %d/%d строк", min(i + BATCH_SIZE, total), total)
 
                     await price_list_repo.update_status(upload.id, UploadStatus.completed)
                     await session.commit()
+                    logger.info("Векторизация каталога: завершена, %d строк", total)
                 except Exception:
                     await session.rollback()
                     await _mark_failed()
+                    logger.exception("Векторизация каталога: ошибка, статус failed")
                     raise
 
                 return {"upload_id": upload_id, "total_rows": total, "status": "completed"}
 
-    return _run_async(_run)
+    token = upload_id_var.set(upload_id)
+    try:
+        return _run_async(_run)
+    finally:
+        upload_id_var.reset(token)
 
 
 @_celery_app.task(bind=True, name="catalog.reembed")
@@ -152,6 +164,7 @@ def reembed_catalog_item(self: Any, item_id: str, name: str) -> dict:
         from app.repositories.catalog_repository import CatalogRepository
         from app.services.embedding_service import EmbeddingService
 
+        logger.info("Пересчёт эмбеддинга позиции каталога: старт (item_id=%s)", item_id)
         container = create_container()
         async with container() as c:
             embedding_svc = await c.get(EmbeddingService)
@@ -161,10 +174,12 @@ def reembed_catalog_item(self: Any, item_id: str, name: str) -> dict:
                 catalog_repo = CatalogRepository(session)
                 item = await catalog_repo.get_by_id(UUID(item_id))
                 if item is None:
+                    logger.warning("Пересчёт эмбеддинга: позиция не найдена (item_id=%s)", item_id)
                     return {"error": "item not found", "item_id": item_id}
                 await catalog_repo.update(item, {"embedding": list(embedding)})
                 await session.commit()
 
+        logger.info("Пересчёт эмбеддинга завершён (item_id=%s)", item_id)
         return {"item_id": item_id, "status": "reembedded"}
 
     return _run_async(_run)
@@ -198,6 +213,8 @@ def process_specification(
         container = create_container()
         redis_pubsub = RedisPubSub()
         channel = f"spec_{upload_id}"
+
+        logger.info("Обработка спецификации: старт (manager_id=%s)", manager_id)
 
         # Номер события: единая нумерация для буфера Redis и live-ленты,
         # по нему SSE-подписчик отсекает дубликаты при пересечении воспроизведения
@@ -235,9 +252,11 @@ def process_specification(
 
                     upload = await spec_repo.get_by_id(UUID(upload_id))
                     if upload is None:
+                        logger.warning("Обработка спецификации: загрузка не найдена")
                         await publish_progress(0, 0, "error", "Загрузка не найдена")
                         return {"error": "upload not found", "upload_id": upload_id}
                     if not upload.column_mapping:
+                        logger.warning("Обработка спецификации: маппинг колонок не подтверждён")
                         await publish_progress(0, 0, "error", "Маппинг колонок не подтверждён")
                         return {"error": "no column_mapping", "upload_id": upload_id}
 
@@ -256,6 +275,7 @@ def process_specification(
                         await spec_repo.update_status(upload.id, UploadStatus.completed)
                         await session.commit()
                         await publish_progress(0, 0, "completed", "В файле нет строк данных")
+                        logger.info("Обработка спецификации: в файле нет строк данных")
                         return {"upload_id": upload_id, "processed": 0, "total": 0, "status": "completed"}
 
                     headers = [str(h) if h is not None else "" for h in sheet_rows[0]]
@@ -283,6 +303,7 @@ def process_specification(
 
                     total = len(rows_data)
                     processed = 0
+                    logger.info("Обработка спецификации: строк данных — %d", total)
 
                     for i in range(0, total, BATCH_SIZE_SPEC):
                         batch = rows_data[i : i + BATCH_SIZE_SPEC]
@@ -340,10 +361,12 @@ def process_specification(
                         # Прогресс виден в UI до окончания обработки всего файла
                         await session.commit()
                         await publish_progress(processed, total, "processing", f"Обработано {processed}/{total} строк")
+                        logger.info("Обработка спецификации: обработано %d/%d строк", processed, total)
 
                     await spec_repo.update_status(upload.id, UploadStatus.completed)
                     await session.commit()
                     await publish_progress(processed, total, "completed", f"Обработано {processed}/{total} строк")
+                    logger.info("Обработка спецификации: завершена, %d/%d строк", processed, total)
 
                     return {
                         "upload_id": upload_id,
@@ -360,8 +383,13 @@ def process_specification(
                     await failed_repo.update_status(upload.id, UploadStatus.failed)
                     await session_failed.commit()
             await publish_progress(0, 0, "error", str(exc))
+            logger.exception("Обработка спецификации: ошибка, статус failed")
             raise
         finally:
             await redis_pubsub.close()
 
-    return _run_async(_run)
+    token = upload_id_var.set(upload_id)
+    try:
+        return _run_async(_run)
+    finally:
+        upload_id_var.reset(token)
