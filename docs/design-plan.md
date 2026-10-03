@@ -115,6 +115,46 @@
   * ✅ Celery-таска `catalog.vectorize` (`app/worker/tasks.py`): читает прайс из MinIO через `PriceListService.parse_pricelist` по подтверждённому `column_mapping`, батчи по 500 строк, эмбеддинги `EmbeddingService` (`intfloat/multilingual-e5-base`, 768-dim), UPSERT в `CatalogItem`.
   * ⚠️ **Исправлено: чтение файла из MinIO только через `MinioService`.** `parse_pricelist` вызывал клиент S3 напрямую с сырым ключом, тогда как при загрузке ключ URL-кодируется (`quote`). Для имён с пробелами/кириллицей (`pricelists/…-260906 Прайс.xlsx`) `HeadObject` возвращал 404, и таска помечала загрузку `failed`. Теперь используется `MinioService.download_fileobj` (кодирует ключ). Правило: не обращаться к `_get_client()`/`_bucket` из других сервисов — только через методы `MinioService`.
 
+* ⚠️ **Требуется доработка: индикация процесса векторизации прайс-листа (без процентов).**
+  Сейчас у загрузки прайса нет видимого прогресса: показывается только статус
+  `processing`, а таска `catalog.vectorize` пишет прогресс лишь в лог
+  (`logger.info("обработано %d/%d")`). Нужен индикатор вида **«5000 / 75 000 записей»**
+  (абсолютные числа, не проценты):
+  * `catalog.vectorize` публикует прогресс после каждого батча (по аналогии с
+    `specification.process` → `RedisPubSub.publish(..., buffered=True)`), событие
+    содержит `processed` / `total`;
+  * отдельная схема события для прайса (например, `PriceListProgressEvent` в
+    `app/schemas/sse_events.py`) с полями `upload_id`, `seq`, `processed`, `total`,
+    `status` (`processing` / `completed` / `error`);
+  * `total` известен после `parse_pricelist`; до этого — событие «подготовка» без чисел;
+  * отображать счётчик в списке загрузок (`admin/pricelists/index.vue`) и/или на странице
+    маппинга (`admin/pricelists/[uploadId].vue`).
+  Затрагивает: `worker/tasks.py`, `schemas/sse_events.py`, `api/v1/admin.py`,
+  `admin/pricelists/*.vue`.
+
+* ⚠️ **Требуется доработка: заменить polling на события (SSE) + отдельное событие завершения.**
+  Сейчас фронтенд прайсов узнаёт о статусах через polling каждые 5 с
+  (`admin/pricelists/index.vue`, `manager/uploads.vue`) — лишние запросы, задержка до 5 с и
+  опрос «вхолостую». Заменить на серверный поток событий:
+  * **Предлагаемый вариант — SSE** (`text/event-stream`) по аналогии с уже работающим
+    потоком спецификаций (`GET /api/v1/manager/specifications/{upload_id}/stream`): тот же
+    `RedisPubSub` с буфером (`buffered=True`, `EVENT_BUFFER_MAX`, TTL), дедупликация по `seq`,
+    воспроизведение буфера при (пере)подключении. Обоснование против WebSocket: только
+    сервер→клиент, не нужны двунаправленность и свой протокол; SSE переиспользует
+    существующий код (`RedisPubSub`, `StreamingResponse`) и проходит через nginx без
+    доп. настройки upgrade. Прямое подключение браузера к Redis Pub/Sub невозможно.
+  * **Отдельное событие завершения** (`status: completed` / `error`) — чтобы клиент не
+    инферил завершение из статусов, а явно закрывал поток и обновлял данные; публикуется
+    последним (как `ProgressEvent` в `specification.process`).
+  * **Frontend сам решает, что отображать**: composable (аналог `useSpecStream`)
+    принимает поток, а страница решает, показывать ли лог/индикатор/тост — события не
+    навязывают UI. Для прайсов достаточно индикатора прогресса + тоста о завершении.
+  * Эндпоинты: `GET /api/v1/admin/pricelists/{upload_id}/stream` (и, при необходимости,
+    `GET /api/v1/manager/specifications/{upload_id}/stream` уже есть). Polling-фолбэк можно
+    оставить как страховку при обрыве потока.
+  Затрагивает: `api/v1/admin.py`, `worker/tasks.py`, `schemas/sse_events.py`,
+  `admin/pricelists/index.vue`, `manager/uploads.vue`, `composables/` (общий стрим-хелпер).
+
 ---
 
 ## Модуль 4: Ядро поиска (Matching Engine)
@@ -165,6 +205,24 @@
   * фронтенд опрашивает статус загрузки и показывает превью с маппингом после готовности.
   Затрагивает: `UploadStatus`, `SpecificationService`, `api/v1/manager.py`, `worker/tasks.py`,
   `manager/specifications/index.vue`.
+
+* ⚠️ **Требуется доработка (архитектура): защита от гонки «векторизация каталога ↔ матчинг спецификации».**
+  `catalog.vectorize` (Задача 3.2) коммитит каталог батчами по 500 строк, а
+  `specification.process` (Задача 5.2) может выполняться параллельно в другом процессе
+  воркера (у worker нет ограничения concurrency). Тогда матчинг видит «частично обновлённый»
+  каталог: одна и та же строка может стать `top_n` или `unmatched` в зависимости от того,
+  успел ли закоммититься нужный батч, — результат недетерминирован. Ошибок и дедлоков нет
+  (UPSERT идемпотентен, таблицы разные), страдает только согласованность результата.
+  Выбранное решение (простейшее): **при `POST /api/v1/manager/specifications` проверять,
+  нет ли загрузок прайс-листов в статусе `processing`, и при наличии возвращать `409`
+  с сообщением «идёт обновление каталога, попробуйте позже».**
+  * Проверка — по `PriceListRepository.count_by_status()` / фильтру `processing`.
+  * Текст ошибки — в `SpecificationMessages` (не хардкодить).
+  * Frontend `manager/specifications/index.vue` — показать тост с текстом 409.
+  * Не покрывает узкое окно (векторизация стартовала после начала матчинга); для строгой
+    корректности потребовалась бы двусторонняя блокировка с TTL — не делаем.
+  * Затрагивает: `api/v1/manager.py`, `SpecificationService`, `SpecificationMessages`,
+    `manager/specifications/index.vue`.
 
 ---
 
