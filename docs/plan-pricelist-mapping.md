@@ -28,9 +28,12 @@
   шаг 2 (редактирование каталога) ✅ выполнен 2026-10-03; шаг 3 ✅ (сделан ранее в
   `11085e3`); шаг 4 (повторная обработка упавших загрузок) ✅ выполнен 2026-10-03;
   шаг 5 (наблюдаемость) ✅ выполнен 2026-10-03; шаг 6 (UX-полировка) ✅ выполнен
-  2026-10-03; шаг 7 — не начат.
-- **Расхождение в документации:** `KODA.md` указывает `GET /health`, фактический маршрут —
-  `/api/v1/health` (`main.py`, `api_prefix + "/health"`); исправить при ближайшей правке.
+  2026-10-03; шаг 7 (безопасность, остатки) ✅ выполнен 2026-10-03. **P2 закрыт.**
+- **Расхождение в документации:** ✅ исправлено 2026-10-03. `KODA.md` приведён в
+  соответствие с кодом: health-маршрут `/api/v1/health` (не `/health`), healthcheck у
+  backend/worker добавлен, экспорт КП описан по фактическим эндпоинтам
+  (`.../proposal`, `/manager/proposals`, `/manager/proposals/{id}/download`; XLSX не
+  реализован), в структуре `main.py` отмечены JSON-логи и middleware `RequestId`.
 
 ## Контекст
 
@@ -357,10 +360,21 @@ P0 закрыт: каталог наполняется (`vectorize_catalog` из
      добавлен polling-фолбэк на случай обрыва SSE.
    Проверка: `ruff check app/` — чисто; `npm run build` — успешно; docker-compose smoke
    пройден 2026-10-03 (см. «Smoke P2.6» ниже).
-7. **Безопасность (остатки).** Ротация `JWT_SECRET_KEY` без обрыва сессий не требуется
-   (сессии в Redis), но: вынести `JWT_COOKIE_SECURE`/`JWT_COOKIE_DOMAIN` в чеклист
-   прод-развёртывания в README; рассмотреть `SameSite=Lax`→`Strict` для refresh-куки
-   после проверки, что refresh не вызывается кросс-сайтово.
+7. ✅ **Безопасность (остатки).** ГОТОВО 2026-10-03. Ротация `JWT_SECRET_KEY` без обрыва
+   сессий не требуется (сессии в Redis), но:
+   - **README: чеклист прод-развёртывания** — добавлен раздел «Прод-развёртывание:
+     чеклист безопасности» с `PROJECT_ENVIRONMENT`, `JWT_SECRET_KEY`, `JWT_COOKIE_SECURE`,
+     `JWT_COOKIE_DOMAIN`, `BACKEND_BASE_URL`/`CORS_ORIGINS` и `NUXT_PUBLIC_API_BASE`;
+     пояснено, что часть настроек валидируется fail-fast, а `JWT_COOKIE_DOMAIN` нужен
+     только при разнесении frontend/API по поддоменам.
+   - **`SameSite=Lax`→`Strict` для refresh-куки.** Проверено по коду: все вызовы
+     `/auth/refresh` идут из `plugins/api.ts` (`rawApi`/`$api`, `credentials: 'include'`)
+     и `useSpecStream` (`EventSource` с `withCredentials`); кросс-сайтовых вызовов нет,
+     frontend и API отдаются с одного origin через nginx
+     (`NUXT_PUBLIC_API_BASE = BACKEND_BASE_URL + /api/v1`). `AuthService._set_token_cookies`
+     выставляет refresh-куке `samesite="strict"`; access-кука оставлена `lax`
+     (короткоживущая, участвует в навигациях/SSR). Комментарии уточнены в
+     `.env.example`.
 
 ## Smoke P2.2 (2026-10-03)
 
@@ -453,3 +467,48 @@ P0 закрыт: каталог наполняется (`vectorize_catalog` из
 Frontend: `npm run build` — успешно (собраны чанки `ToastHost`, `TableSkeleton`,
 `useToast`). Логика тостов/скелетонов/polling проверена сборкой и ручной ревизией
 шаблонов.
+
+## Smoke P2.7 (2026-10-03)
+
+Проверка безопасности (остатки) в docker compose (backend перезапущен, код монтируется
+volume'ом; контейнер `healthy`):
+
+- **Атрибуты auth-кук.** `POST /api/v1/auth/login` (`smoke-admin@example.com`) отдаёт:
+  `access_token` — `HttpOnly; SameSite=lax; Path=/; Max-Age=900`; `refresh_token` —
+  `HttpOnly; SameSite=strict; Path=/api/v1/auth; Max-Age=604800`. То есть refresh-кука
+  переведена на `Strict`, access осталась `Lax`.
+- **Refresh-поток не сломан.** `POST /api/v1/auth/refresh` с refresh-кукой → `204`,
+  куки ротируются с теми же атрибутами (`SameSite=strict` для refresh).
+- **Разведка кросс-сайтовости (по коду).** Все вызовы `/auth/refresh` — из
+  `plugins/api.ts` (`rawApi`/`$api`, `credentials: 'include'`) и `useSpecStream`
+  (`EventSource` c `withCredentials: true`); frontend и API отдаются с одного origin
+  через nginx, `NUXT_PUBLIC_API_BASE = BACKEND_BASE_URL + /api/v1` — кросс-сайтовых
+  вызовов refresh нет, `Strict` безопасен.
+- **README.** Добавлен раздел «Прод-развёртывание: чеклист безопасности»
+  (`PROJECT_ENVIRONMENT`, `JWT_SECRET_KEY`, `JWT_COOKIE_SECURE`, `JWT_COOKIE_DOMAIN`,
+  `BACKEND_BASE_URL`/`CORS_ORIGINS`, `NUXT_PUBLIC_API_BASE`).
+- `ruff check app/` — чисто; логи backend без ошибок.
+
+## Дополнение: JSON-логи backend с request_id (2026-10-03)
+
+После P2.7 закрыт пробел «логи backend остались в формате uvicorn» (см. Smoke P2.5):
+структурированы **application-логи** backend (собственные логгеры приложения); логгеры
+uvicorn (`uvicorn*`, `propagate=False`) сознательно не трогаются — access-логи остаются
+текстовыми.
+
+- `core/logging_config.py`: единый `JsonFormatter` с настраиваемым набором контекстных
+  полей; для worker — `upload_id`, для backend — `request_id`. Фильтры `UploadIdFilter` /
+  `RequestIdFilter` берут значение из ContextVar; `configure_worker_logging()` /
+  `configure_backend_logging()` — общий `_configure_root_logging`.
+- `core/middleware.py`: `RequestIdMiddleware` (чистый ASGI, чтобы ContextVar был виден
+  эндпоинту) читает `X-Request-ID` от nginx, иначе генерирует `secrets.token_hex(16)`
+  (32 hex — как nginx `$request_id`); возвращает `X-Request-ID` в ответе.
+- `main.py`: `configure_backend_logging()` при импорте + `app.add_middleware(RequestIdMiddleware)`.
+- `srv/nginx/conf.d/default.conf`: `proxy_set_header X-Request-ID $request_id;` в `/api/` и
+  `/health`.
+
+Проверка 2026-10-03: `curl /health` и `/api/v1/health` через nginx возвращают `X-Request-ID`
+(32 hex); в контейнере application-лог — JSON
+`{"timestamp","level","logger","request_id","message"}` с проброшенным id; изолированный
+TestClient подтвердил проброс заголовка в лог и генерацию при его отсутствии; `ruff check app/`
+— чисто; backend/worker/nginx перезапущены, стек `healthy`.

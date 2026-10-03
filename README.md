@@ -8,3 +8,29 @@
   * **Tier 1 (`auto`)** — точное совпадение по словарю подтверждённых совпадений (`HistoricalMatch`, ключ — SHA-256 хэш исходного наименования).
   * **Tier 2 (`top_n`)** — варианты из векторного поиска по эмбеддингам (pgvector, HNSW-индекс, косинусная дистанция).
   * **Tier 3 (`unmatched`)** — не найдено; строки ожидают ручного подтверждения/исключения менеджером.
+
+## Прод-развёртывание: чеклист безопасности
+
+Приложение `fail-fast` проверяет часть настроек на старте: при `PROJECT_ENVIRONMENT != loc`
+оно **не запустится** с дефолтным секретом или с auth-куками без флага `Secure`
+(`Settings._validate_safety`, `backend/app/core/config.py`).
+
+Обязательно перед прод-запуском:
+
+- **`PROJECT_ENVIRONMENT`** — любое значение кроме `loc` (включает строгую валидацию).
+- **`JWT_SECRET_KEY`** — уникальный, не `change-me-in-production`
+  (`python -c "import secrets; print(secrets.token_hex(32))"`). Ротация секрета обрывает
+  активные сессии: refresh-токены хранятся в Redis, но подписываются старым ключом.
+- **`JWT_COOKIE_SECURE=True`** — куки передаются только по HTTPS.
+- **`JWT_COOKIE_DOMAIN`** — домен auth-кук. Пусто = домен запроса (штатный случай, когда
+  frontend и API отдаются с одного origin через nginx). Задавать явно (`.example.com`),
+  только если frontend и API разнесены по поддоменам; иначе браузер не сочтёт куки
+  same-site и авторизация сломается.
+- **`BACKEND_BASE_URL` и `CORS_ORIGINS`** — домен `BACKEND_BASE_URL` должен присутствовать
+  среди origin'ов `CORS_ORIGINS`. Несовпадение не блокирует старт, но пишет предупреждение
+  (`ConfigMessages.cors_domain_mismatch`): это риск, что браузер не отправит auth-куки.
+- **`NUXT_PUBLIC_API_BASE`** (в `docker-compose.yml` = `BACKEND_BASE_URL` + `BACKEND_API_PREFIX`)
+  должен указывать на тот же сайт, что и origin фронтенда.
+
+Auth-куки выдаются только как `HttpOnly`. Refresh-кука имеет `SameSite=Strict` (вызывается
+только XHR внутри приложения), access-кука — `SameSite=Lax`.

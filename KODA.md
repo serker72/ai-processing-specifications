@@ -40,7 +40,7 @@ ai-processing-specifications/
 * **Модуль 4** — Matching Engine: сервис `match_row(raw_name, sku)` с трёхуровневым алгоритмом (Tier 1 — словарь по SHA-256; Tier 2 — векторный поиск `<=>`, топ-5 при cosine score ≥ 0.70; Tier 3 — unmatched).
 * **Модуль 5** — рабочее место менеджера: загрузка спецификаций, асинхронный процессинг Celery, real-time обновления через Redis Pub/Sub (`channel: spec_{id}`) и SSE (`GET /api/v1/manager/specifications/{id}/stream`).
 * **Модуль 6** — frontend на Nuxt 3: middleware защиты роутов, интерцепторы `ofetch` (cookies, авто-refresh при 401), UI с цветовым кодированием результатов матчинга.
-* **Модуль 7** — генератор КП: экспорт `GET /api/v1/manager/specifications/{id}/export?format=pdf|xlsx` (WeasyPrint + Jinja2 / openpyxl).
+* **Модуль 7** — генератор КП (PDF, WeasyPrint + Jinja2): `GET/POST /api/v1/manager/specifications/{upload_id}/proposal` (текущее состояние / формирование), история `GET /api/v1/manager/proposals`, скачивание `GET /api/v1/manager/proposals/{proposal_id}/download`. Экспорт в XLSX не реализован.
 
 План — первичный источник требований; при расхождении с кодом приоритет у кода, а устаревшие пункты плана стоит помечать/обновлять.
 
@@ -109,7 +109,8 @@ ai-processing-specifications/
 ```
 backend/
 ├── app/
-│   ├── main.py            # Точка входа FastAPI (эндпоинт /health, подключение api_router и DI)
+│   ├── main.py            # Точка входа FastAPI (эндпоинт {api_prefix}/health, JSON-логи,
+│   │                      #   middleware RequestId, подключение api_router и DI)
 │   ├── worker/            # Celery-пакет: `celery_app` в __init__.py, таски в tasks.py, Redis Pub/Sub
 │   ├── api/
 │   │   └── v1/            # Роутеры FastAPI (route_class=DishkaRoute), только приём/ответ:
@@ -241,12 +242,12 @@ npm run preview                   # nuxt preview
 
 Примечания к Dockerfile:
 
-* Базовый образ `python:3.13-slim` + системные библиотеки pango/cairo/gdk-pixbuf (нужны WeasyPrint) и curl (для проверок из контейнера; `healthcheck` в compose объявлен у postgres, redis и minio, у backend — нет).
+* Базовый образ `python:3.13-slim` + системные библиотеки pango/cairo/gdk-pixbuf (нужны WeasyPrint) и curl (для проверок из контейнера; `healthcheck` в compose объявлен у postgres, redis, minio, backend и worker).
 * Зависимости ставятся через `uv sync --frozen --no-dev --no-install-project`; venv размещается в `/opt/venv`, чтобы bind-mount исходников (`./backend/app:/app/app`) его не затирал.
 
 ### Проверка работоспособности
 
-* `GET /health` — возвращает `{"status": "ok"}`.
+* `GET /api/v1/health` — возвращает `{"status": "ok"}` (nginx дополнительно проксирует его на `GET /health`).
 
 ## Правила разработки
 
