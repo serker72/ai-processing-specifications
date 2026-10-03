@@ -37,7 +37,15 @@
               >
                 Открыть
               </NuxtLink>
-              <span v-else class="text-muted">—</span>
+              <button
+                v-if="upload.status === 'failed'"
+                class="btn-action"
+                :disabled="retryingId === upload.id"
+                @click="retryUpload(upload.id)"
+              >
+                {{ retryingId === upload.id ? 'Запуск…' : 'Повторить' }}
+              </button>
+              <span v-if="upload.status !== 'completed' && upload.status !== 'failed'" class="text-muted">—</span>
             </td>
           </tr>
         </tbody>
@@ -81,6 +89,7 @@ const STATUS_LABELS: Record<string, string> = {
 const uploads = ref<SpecificationUploadItem[]>([])
 const isLoading = ref(false)
 const loadError = ref('')
+const retryingId = ref('')
 
 // $api — API-клиент из plugins/api.ts: credentials и повтор запроса после 401
 const { $api } = useNuxtApp() as any
@@ -104,6 +113,19 @@ async function loadUploads() {
     loadError.value = err?.data?.detail || 'Не удалось загрузить список спецификаций'
   } finally {
     isLoading.value = false
+  }
+}
+
+async function retryUpload(id: string) {
+  retryingId.value = id
+  loadError.value = ''
+  try {
+    await $api(`/manager/specifications/${id}/retry`, { method: 'POST' })
+    await loadUploads()
+  } catch (err: any) {
+    loadError.value = err?.data?.detail || 'Не удалось повторить обработку спецификации'
+  } finally {
+    retryingId.value = ''
   }
 }
 

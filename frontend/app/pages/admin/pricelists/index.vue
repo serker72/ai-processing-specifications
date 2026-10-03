@@ -81,6 +81,14 @@
               >
                 Маппинг
               </NuxtLink>
+              <button
+                v-if="upload.status === 'failed'"
+                class="btn-action"
+                :disabled="retryingId === upload.id"
+                @click="retryUpload(upload.id)"
+              >
+                {{ retryingId === upload.id ? 'Запуск…' : 'Повторить' }}
+              </button>
             </td>
           </tr>
         </tbody>
@@ -130,6 +138,7 @@ const uploads = ref<PriceListUpload[]>([])
 const counts = ref<Record<string, number>>({})
 const statusFilter = ref('')
 const error = ref('')
+const retryingId = ref('')
 
 /** Подписи статусов UploadStatus для чипов фильтра. */
 const STATUS_LABELS: Record<string, string> = {
@@ -173,6 +182,19 @@ async function loadUploads() {
 function applyFilter(status: string) {
   statusFilter.value = status
   loadUploads()
+}
+
+async function retryUpload(id: string) {
+  retryingId.value = id
+  error.value = ''
+  try {
+    await $api(`/admin/pricelists/${id}/retry`, { method: 'POST' })
+    await loadUploads()
+  } catch (err: any) {
+    error.value = err?.data?.detail || 'Не удалось повторить обработку прайс-листа'
+  } finally {
+    retryingId.value = ''
+  }
 }
 
 function handleFileSelect(event: Event) {
