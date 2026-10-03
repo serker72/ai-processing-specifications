@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -67,6 +67,18 @@ class SpecificationRepository:
         if upload:
             upload.status = status
             await self._session.flush()
+
+    async def delete_rows(self, upload_id: UUID) -> None:
+        """Удалить все строки загрузки.
+
+        Нужно перед повторной обработкой: таска перечитывает файл целиком и
+        создаёт строки заново, поэтому частично записанные при падении строки
+        иначе превратились бы в дубли.
+        """
+        await self._session.execute(
+            delete(SpecificationRow).where(SpecificationRow.upload_id == upload_id)
+        )
+        await self._session.flush()
 
     async def get_for_manager(self, upload_id: UUID, manager_id: UUID) -> SpecificationUpload | None:
         """Загрузка спецификации, только если она принадлежит менеджеру.

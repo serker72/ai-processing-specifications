@@ -179,6 +179,29 @@ class SpecificationService:
         """Зафиксировать загрузку до постановки таски: воркер должен увидеть запись."""
         await self._spec_repo.commit()
 
+    async def retry(self, upload_id: uuid.UUID, manager_id: uuid.UUID) -> dict[str, object]:
+        """Перезапустить обработку упавшей спецификации.
+
+        Повторный матчинг использует уже подтверждённый `column_mapping`; старые
+        (частичные) строки удаляются, чтобы повторное чтение файла не дало дублей.
+        Допускается только для статуса `failed`.
+
+        Raises:
+            LookupError: загрузки нет либо она принадлежит другому менеджеру.
+            ValueError: статус не `failed` либо маппинг не подтверждён.
+        """
+        upload = await self._spec_repo.get_for_manager(upload_id, manager_id)
+        if upload is None:
+            raise LookupError(CommonMessages.NOT_FOUND)
+        if upload.status != UploadStatus.failed:
+            raise ValueError(SpecificationMessages.RETRY_NOT_FAILED)
+        if not upload.column_mapping:
+            raise ValueError(SpecificationMessages.NO_MAPPING)
+
+        await self._spec_repo.delete_rows(upload.id)
+        await self._spec_repo.update_status(upload.id, UploadStatus.processing)
+        return {"upload_id": str(upload.id), "status": UploadStatus.processing.value}
+
     async def update_row_status(
         self,
         upload_id: uuid.UUID,

@@ -190,6 +190,27 @@ class PriceListService:
         """Зафиксировать загрузку до постановки таски: воркер должен увидеть запись."""
         await self._price_list_repo.commit()
 
+    async def retry(self, upload_id: uuid.UUID) -> dict[str, object]:
+        """Перезапустить обработку упавшей загрузки прайс-листа.
+
+        Повторная векторизация использует уже подтверждённый `column_mapping`.
+        Допускается только для статуса `failed`.
+
+        Raises:
+            FileNotFoundError: загрузки нет.
+            ValueError: статус не `failed` либо маппинг не подтверждён.
+        """
+        upload = await self._price_list_repo.get_by_id(upload_id)
+        if not upload:
+            raise FileNotFoundError(PriceListMessages.UPLOAD_NOT_FOUND)
+        if upload.status != UploadStatus.failed:
+            raise ValueError(PriceListMessages.RETRY_NOT_FAILED)
+        if not upload.column_mapping:
+            raise ValueError(PriceListMessages.NO_MAPPING)
+
+        await self._price_list_repo.update_status(upload.id, UploadStatus.processing)
+        return {"upload_id": str(upload.id), "status": UploadStatus.processing.value}
+
     async def parse_pricelist(self, file_key: str, column_mapping: dict) -> list[dict]:
         """Прочитать прайс-лист из MinIO и вернуть список строк по маппингу.
 

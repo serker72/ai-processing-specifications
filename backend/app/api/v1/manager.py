@@ -428,6 +428,51 @@ async def upload_specification(
     return result
 
 
+@manager_router.post(
+    "/specifications/{upload_id}/retry",
+    status_code=status.HTTP_200_OK,
+    summary="Повторить обработку упавшей спецификации",
+)
+async def retry_specification(
+    upload_id: str,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    specification_service: FromDishka[SpecificationService],
+) -> dict:
+    """Перезапустить матчинг строк для спецификации в статусе `failed`.
+
+    Повторная таска использует сохранённый маппинг; старые (частичные) строки
+    удаляются, допускается только для `failed`.
+    """
+    manager: User = await get_current_manager(
+        request, settings, security_service, session_repository, user_repository
+    )
+
+    try:
+        result = await specification_service.retry(parse_upload_id(upload_id), manager.id)
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+    # Commit до .delay(): воркер не должен увидеть задачу раньше, чем статус
+    # и очистка строк станут видны в базе.
+    await specification_service.commit_upload()
+    process_specification.delay(result["upload_id"], str(manager.id))
+
+    return result
+
+
 @manager_router.patch(
     "/specifications/{upload_id}/rows/{row_id}",
     response_model=SpecificationRowItem,

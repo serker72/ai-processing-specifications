@@ -404,6 +404,56 @@ async def confirm_pricelist_mapping(
 
 
 @admin_router.post(
+    "/pricelists/{upload_id}/retry",
+    status_code=status.HTTP_200_OK,
+    summary="Повторить обработку упавшей загрузки прайс-листа",
+)
+async def retry_pricelist(
+    upload_id: str,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    price_list_service: FromDishka[PriceListService],
+) -> dict:
+    """Перезапустить векторизацию каталога для загрузки в статусе `failed`.
+
+    Повторная таска использует сохранённый подтверждённый маппинг; допускается
+    только для `failed`.
+    """
+    await get_current_admin(request, settings, security_service, session_repository, user_repository)
+
+    import uuid
+
+    try:
+        parsed_id = uuid.UUID(upload_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=CommonMessages.NOT_FOUND) from None
+
+    try:
+        result = await price_list_service.retry(parsed_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+    # Commit до .delay(): воркер не должен увидеть задачу раньше, чем статус
+    # и маппинг станут видны в базе.
+    await price_list_service.commit_upload()
+    vectorize_catalog.delay(upload_id)
+
+    return result
+
+
+@admin_router.post(
     "/proposal-templates",
     response_model=ProposalTemplateResponse,
     status_code=status.HTTP_201_CREATED,

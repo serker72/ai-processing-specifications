@@ -41,6 +41,8 @@ class PriceListMessages:
     """Сообщения модуля прайс-листов."""
 
     UPLOAD_NOT_FOUND = "Загрузка прайс-листа не найдена"
+    RETRY_NOT_FAILED = "Повторить обработку можно только для загрузки со статусом «Ошибка»"
+    NO_MAPPING = "Маппинг колонок прайс-листа не подтверждён"
 
     @staticmethod
     def column_not_in_file(column: str) -> str:
@@ -61,6 +63,8 @@ class SpecificationMessages:
     ROW_STATUS_UNSUPPORTED = "Недопустимый статус строки"
     CONFIRM_REQUIRES_ITEM = "Для подтверждения строки нужна позиция каталога"
     CATALOG_ITEM_NOT_FOUND = "Позиция каталога не найдена"
+    RETRY_NOT_FAILED = "Повторить обработку можно только для спецификации со статусом «Ошибка»"
+    NO_MAPPING = "Маппинг колонок спецификации не подтверждён"
 
 
 class ClientMessages:
