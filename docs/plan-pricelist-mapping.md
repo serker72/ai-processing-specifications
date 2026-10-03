@@ -27,7 +27,8 @@
 - **P2** — шаг 1 (экспорт КП, P2.1.1–P2.1.8) ✅ выполнен 2026-10-02 (см. «Smoke P2.1»);
   шаг 2 (редактирование каталога) ✅ выполнен 2026-10-03; шаг 3 ✅ (сделан ранее в
   `11085e3`); шаг 4 (повторная обработка упавших загрузок) ✅ выполнен 2026-10-03;
-  шаг 5 (наблюдаемость) ✅ выполнен 2026-10-03; шаги 6, 7 — не начаты.
+  шаг 5 (наблюдаемость) ✅ выполнен 2026-10-03; шаг 6 (UX-полировка) ✅ выполнен
+  2026-10-03; шаг 7 — не начат.
 - **Расхождение в документации:** `KODA.md` указывает `GET /health`, фактический маршрут —
   `/api/v1/health` (`main.py`, `api_prefix + "/health"`); исправить при ближайшей правке.
 
@@ -328,9 +329,34 @@ P0 закрыт: каталог наполняется (`vectorize_catalog` из
      отображается чипом «Ошибка · N» в истории админки — доработка не требовалась.
    Проверка: `ruff check app/` — чисто; docker-compose smoke пройден 2026-10-03
    (см. «Smoke P2.5» ниже).
-6. **UX-полировка.** Пагинация истории прайсов (сейчас грузится всё), авто-обновление
-   статусов в истории (polling 5 с для строк в `processing`), тосты вместо текстовых
-   `error`-блоков, скелетоны таблиц при загрузке.
+6. ✅ **UX-полировка.** ГОТОВО 2026-10-03:
+   - **Пагинация истории прайсов.** `PriceListRepository.list_filtered` принимает
+     `offset`/`limit`, добавлен `count_filtered`; `PriceListService.list_uploads(status,
+     page, page_size)` возвращает `(items, counts, total)`; `PriceListListResponse`
+     дополнен `total`/`page`/`page_size`; `GET /admin/pricelists` — query-параметры
+     `page` (≥1) и `page_size` (1..200, по умолчанию 50). Счётчики статусов по-прежнему
+     считаются по всем загрузкам, `total` — по фильтру. Frontend
+     `pages/admin/pricelists/index.vue` — пейджер, размер страницы 20.
+   - **Тост-система.** `composables/useToast.ts` (очередь в `useState`,
+     `success`/`error`/`info`, `fromError` извлекает `detail` ответа `$api`),
+     `components/common/ToastHost.vue` + стили `.toast*` в `assets/css/main.css`;
+     хост подключён в layout'ах `workspace` и `default`.
+   - **Тосты вместо текстовых error-блоков** на страницах: `admin/pricelists/index.vue`,
+     `admin/pricelists/[uploadId].vue`, `admin/catalog.vue`, `admin/settings.vue`,
+     `admin/proposal-templates.vue`, `admin/users.vue`, `admin/devices.vue`,
+     `admin/sessions.vue`, `manager/uploads.vue`, `manager/proposals.vue`,
+     `manager/specifications/index.vue`, `manager/specifications/[uploadId].vue`,
+     `login.vue`. Успешные операции (загрузка, retry, сохранение, подтверждение маппинга,
+     формирование/скачивание КП) теперь тоже уведомляют тостом.
+   - **Скелетоны таблиц.** `components/common/TableSkeleton.vue` (плейсхолдер-строки,
+     `.skeleton-line` + анимация) вместо текста «Загрузка списка…» на всех табличных
+     страницах кабинетов.
+   - **Авто-обновление статусов.** Polling 5 с в `admin/pricelists/index.vue` и
+     `manager/uploads.vue`, пока есть загрузки в `processing`; фоновое обновление без
+     скелетона и без тостов об ошибке. На `manager/specifications/[uploadId].vue`
+     добавлен polling-фолбэк на случай обрыва SSE.
+   Проверка: `ruff check app/` — чисто; `npm run build` — успешно; docker-compose smoke
+   пройден 2026-10-03 (см. «Smoke P2.6» ниже).
 7. **Безопасность (остатки).** Ротация `JWT_SECRET_KEY` без обрыва сессий не требуется
    (сессии в Redis), но: вынести `JWT_COOKIE_SECURE`/`JWT_COOKIE_DOMAIN` в чеклист
    прод-развёртывания в README; рассмотреть `SameSite=Lax`→`Strict` для refresh-куки
@@ -408,3 +434,22 @@ P0 закрыт: каталог наполняется (`vectorize_catalog` из
   `StreamHandler(sys.stdout)` писал в proxy, а не в реальный поток контейнера, и
   записи терялись. Фикс: `worker_redirect_stdouts=False` в конфиге Celery (вместе с
   `worker_hijack_root_logger=False`).
+
+## Smoke P2.6 (2026-10-03)
+
+Проверка пагинации истории прайсов в docker compose (backend/worker пересобраны и
+перезапущены, стек `healthy`):
+
+- `GET /admin/pricelists?page=1&page_size=2` — `total: 7`, `page: 1`, `page_size: 2`,
+  две записи; `counts: {pending: 4, mapping_predicted: 0, processing: 1, completed: 1,
+  failed: 1}` (сумма = 7, счётчики глобальные).
+- `GET /admin/pricelists?page=2&page_size=2` — те же `total/page/page_size`, другие id
+  (страницы не пересекаются).
+- `GET /admin/pricelists?status=failed` — `total: 1`, одна запись `failed`, `counts`
+  остаются глобальными.
+- Валидация: `page_size=500` → 422, `page=0` → 422.
+- Логи backend/worker без ошибок, оба контейнера `healthy`.
+
+Frontend: `npm run build` — успешно (собраны чанки `ToastHost`, `TableSkeleton`,
+`useToast`). Логика тостов/скелетонов/polling проверена сборкой и ручной ревизией
+шаблонов.
