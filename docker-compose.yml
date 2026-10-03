@@ -85,6 +85,12 @@ services:
     volumes:
       - ./backend/app:/app/app
       - hfdata:${HF_DATA_DIR}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     depends_on:
       pgbouncer:
         condition: service_started
@@ -107,6 +113,13 @@ services:
     volumes:
       - ./backend/app:/app/app
       - hfdata:${HF_DATA_DIR}
+    healthcheck:
+      # У worker нет HTTP-сервера: живость проверяем пингом по брокеру
+      test: ["CMD-SHELL", "celery -A app.worker inspect ping --timeout 10 >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
     depends_on:
       pgbouncer:
         condition: service_started
