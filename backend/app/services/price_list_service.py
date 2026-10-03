@@ -223,16 +223,9 @@ class PriceListService:
 
         Возвращает список dict с ключами: sku, name, unit, price, description.
         """
-        import io
-
-        fileobj = io.BytesIO()
-        client = await self._minio._get_client()
-        await client.download_fileobj(
-            Bucket=self._minio._bucket,
-            Key=file_key,
-            Fileobj=fileobj,
-        )
-        fileobj.seek(0)
+        # Через MinioService: он URL-кодирует ключ. Прямой вызов клиента с
+        # сырым ключом ломается на пробелах/кириллице в имени файла (404).
+        fileobj = await self._minio.download_fileobj(file_key)
 
         preview = self._excel_preview.read_preview(fileobj, max_rows=None)  # все строки
         headers = preview["headers"]
