@@ -83,6 +83,21 @@
 * LLM возвращает Pydantic-схему ролей колонок (Где артикул? Где название? Где цена?).
 * Возврат предложенного маппинга на фронтенд для ручного подтверждения администратором.
 
+* ⚠️ **Требуется доработка (архитектура): LLM-маппинг вынести из HTTP-запроса в фоновую задачу.**
+  Сейчас `POST /api/v1/admin/pricelists` синхронно вызывает LLM, из-за чего запрос блокируется
+  на всё время анализа (на CPU-модели реальный замер — ~126 640 мс для широкого прайса).
+  Правильно:
+  * загрузить файл в MinIO и сразу создать запись `PriceListUpload` со статусом `created`
+    (или переиспользовать `pending`), вернуть `202 Accepted` с `upload_id` без ожидания LLM;
+  * предсказание маппинга выполнять в Celery-таске (`pricelist.predict_mapping`) —
+    по аналогии с векторизацией каталога (Задача 3.2) и обработкой спецификаций (Задача 5.2);
+  * добавить промежуточный статус `mapping_processing` (в `UploadStatus`) на время анализа,
+    по завершении — `mapping_predicted` / `failed`;
+  * фронтенд опрашивает статус загрузки (polling, как для `processing`) и показывает превью
+    с маппингом после готовности.
+  Затрагивает: `UploadStatus`, `PriceListService.upload_and_predict`, `api/v1/admin.py`,
+  `worker/tasks.py`, страницу `admin/pricelists/[uploadId].vue`.
+
 
 
 ### Задача 3.2: Векторизация каталога (Background Worker)
@@ -95,6 +110,10 @@
 
 
 * **DoD:** Большие прайсы обрабатываются асинхронно без блокировки event-loop'а.
+
+* **✅ Реализация:**
+  * ✅ Celery-таска `catalog.vectorize` (`app/worker/tasks.py`): читает прайс из MinIO через `PriceListService.parse_pricelist` по подтверждённому `column_mapping`, батчи по 500 строк, эмбеддинги `EmbeddingService` (`intfloat/multilingual-e5-base`, 768-dim), UPSERT в `CatalogItem`.
+  * ⚠️ **Исправлено: чтение файла из MinIO только через `MinioService`.** `parse_pricelist` вызывал клиент S3 напрямую с сырым ключом, тогда как при загрузке ключ URL-кодируется (`quote`). Для имён с пробелами/кириллицей (`pricelists/…-260906 Прайс.xlsx`) `HeadObject` возвращал 404, и таска помечала загрузку `failed`. Теперь используется `MinioService.download_fileobj` (кодирует ключ). Правило: не обращаться к `_get_client()`/`_bucket` из других сервисов — только через методы `MinioService`.
 
 ---
 
@@ -133,6 +152,19 @@
   * ✅ `SpecificationMappingPrediction` — Pydantic-схема ответа LLM (name, quantity, unit, price, additional_columns).
   * ✅ DI-провайдеры для `SpecificationRepository` и `SpecificationService`.
   * ✅ Smoke-тест: загрузка Excel → MinIO + превью + LLM-маппинг → 201 Created.
+
+* ⚠️ **Требуется доработка (архитектура): LLM-маппинг вынести из HTTP-запроса в фоновую задачу.**
+  Как и в Задаче 3.1, `POST /api/v1/manager/specifications` синхронно вызывает LLM —
+  запрос блокируется на всё время анализа. Правильно:
+  * загрузить файл в MinIO и сразу создать запись `SpecificationUpload` со статусом `created`
+    (или переиспользовать `pending`), вернуть `202 Accepted` с `upload_id` без ожидания LLM;
+  * предсказание маппинга выполнять в Celery-таске (по аналогии с `specification.process`,
+    Задача 5.2);
+  * промежуточный статус `mapping_processing` (в `UploadStatus`) на время анализа, далее
+    `mapping_predicted` / `failed`;
+  * фронтенд опрашивает статус загрузки и показывает превью с маппингом после готовности.
+  Затрагивает: `UploadStatus`, `SpecificationService`, `api/v1/manager.py`, `worker/tasks.py`,
+  `manager/specifications/index.vue`.
 
 ---
 
