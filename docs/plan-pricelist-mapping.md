@@ -26,8 +26,8 @@
   `npm run build` — успешно; docker-compose smoke пройден 2026-10-01 (см. ниже).
 - **P2** — шаг 1 (экспорт КП, P2.1.1–P2.1.8) ✅ выполнен 2026-10-02 (см. «Smoke P2.1»);
   шаг 2 (редактирование каталога) ✅ выполнен 2026-10-03; шаг 3 ✅ (сделан ранее в
-  `11085e3`); шаг 5 частично (`/api/v1/health` есть, healthcheck backend/worker в compose
-  нет); шаги 4, 6, 7 — не начаты.
+  `11085e3`); шаг 4 (повторная обработка упавших загрузок) ✅ выполнен 2026-10-03;
+  шаг 5 (наблюдаемость) ✅ выполнен 2026-10-03; шаги 6, 7 — не начаты.
 - **Расхождение в документации:** `KODA.md` указывает `GET /health`, фактический маршрут —
   `/api/v1/health` (`main.py`, `api_prefix + "/health"`); исправить при ближайшей правке.
 
@@ -301,12 +301,33 @@ P0 закрыт: каталог наполняется (`vectorize_catalog` из
 3. ✅ **UI шаблонов КП: редактирование.** УЖЕ РЕАЛИЗОВАНО в `11085e3`: инлайн-правка
    (`startEdit`/`saveTemplate`) → `PATCH /admin/proposal-templates/{id}` на
    `pages/admin/proposal-templates.vue`.
-4. **Повторная обработка упавших загрузок.** Кнопка «Повторить» для `failed` в истории
-   прайсов и спецификаций: `POST .../pricelists/{id}/retry` и `.../specifications/{id}/retry`
-   (пере-постановка таски с существующим `column_mapping`).
-5. **Наблюдаемость.** Healthcheck-эндпоинт уже есть (`/api/v1/health`) — добавить
-   healthcheck-и контейнеров backend/worker в `docker-compose.yml`; структурированные
-   логи worker (upload_id в каждой записи); счётчик `failed`-загрузок в истории админки.
+4. ✅ **Повторная обработка упавших загрузок.** ГОТОВО 2026-10-03: кнопка «Повторить»
+   для `failed` в истории прайсов и спецификаций. Backend:
+   `POST /api/v1/admin/pricelists/{id}/retry` (`PriceListService.retry`) и
+   `POST /api/v1/manager/specifications/{id}/retry` (`SpecificationService.retry`,
+   `SpecificationRepository.delete_rows`) — пере-постановка таски с существующим
+   `column_mapping`, допускается только для статуса `failed`; перед повтором
+   спецификации частичные строки удаляются, чтобы не было дублей. Сообщения —
+   `PriceListMessages`/`SpecificationMessages` (`RETRY_NOT_FAILED`, `NO_MAPPING`).
+   Frontend: `pages/admin/pricelists/index.vue`, `pages/manager/uploads.vue`.
+   Проверка: `ruff check app/` — чисто, `npm run build` — успешно; docker-compose smoke
+   пройден 2026-10-03 (см. «Smoke P2.4» ниже).
+5. ✅ **Наблюдаемость.** ГОТОВО 2026-10-03:
+   - healthcheck-и контейнеров в `docker-compose.yml`: backend — `curl -fsS
+     http://localhost:8000/api/v1/health` (10 с, start_period 30 с), worker — `celery
+     -A app.worker inspect ping --timeout 10` (30 с, start_period 60 с); оба контейнера
+     переходят в `healthy`.
+   - структурированные JSON-логи worker: `app/core/logging_config.py` (JsonFormatter +
+     `UploadIdFilter` + ContextVar `upload_id_var`), `configure_worker_logging()` в
+     сигнале `worker_process_init`; в `worker/__init__.py` — `worker_hijack_root_logger=False`
+     и `worker_redirect_stdouts=False` (иначе Celery подменяет stdout LoggingProxy и
+     JSON-записи пропадают). В тасках `catalog.vectorize` / `specification.process`
+     `upload_id` кладётся в ContextVar (в `catalog.reembed` его нет — `-`), добавлены
+     логи старта, объёма, прогресса по батчам, завершения и ошибок.
+   - счётчик `failed`-загрузок уже отдаётся в `GET /admin/pricelists` (`counts.failed`) и
+     отображается чипом «Ошибка · N» в истории админки — доработка не требовалась.
+   Проверка: `ruff check app/` — чисто; docker-compose smoke пройден 2026-10-03
+   (см. «Smoke P2.5» ниже).
 6. **UX-полировка.** Пагинация истории прайсов (сейчас грузится всё), авто-обновление
    статусов в истории (polling 5 с для строк в `processing`), тосты вместо текстовых
    `error`-блоков, скелетоны таблиц при загрузке.
@@ -334,3 +355,56 @@ P0 закрыт: каталог наполняется (`vectorize_catalog` из
 - **Гонка с Celery-таской `catalog.reembed`.** Правка коммитилась только в teardown
   запроса, а `.delay()` ставился раньше — воркер мог не найти позицию. Фикс:
   `CatalogService.commit_item()` (коммит до `.delay()`), по аналогии с `commit_upload`.
+
+## Smoke P2.4 (2026-10-03)
+
+Проверка повторной обработки упавших загрузок в docker compose (стек поднят, миграции
+на `a5e6f7b8c9d0`; backend/worker перезапущены, код монтируется volume'ом).
+
+Прайс-листы (`POST /admin/pricelists/{id}/retry`):
+- `completed` → 400 «Повторить обработку можно только для загрузки со статусом «Ошибка»»;
+- несуществующий UUID → 404; невалидный UUID → 404 «Объект не найден»;
+- завершённый прайс переведён в `failed` вручную → retry вернул `200 {status: processing}`,
+  воркер обработал `catalog.vectorize` → статус `completed`.
+
+Спецификации (`POST /manager/specifications/{id}/retry`):
+- загрузка smoke-менеджером (3 строки) → `completed`, 3 строки `matched`;
+- `completed` → 400; несуществующий/невалидный UUID → 404; чужая загрузка (другой
+  менеджер) → 404;
+- `failed` без `column_mapping` → 400 «Маппинг колонок спецификации не подтверждён»;
+- `failed` с маппингом → retry вернул `200 {status: processing}`, старые строки удалены
+  (`delete_rows`: 3 → 0 сразу после вызова), воркер перечитал файл → снова `completed`,
+  3 строки `matched` (дублей нет).
+
+Логи backend/worker без ошибок (только штатный SIGTERM при перезапуске).
+
+**Дефект, найденный при smoke P2.4 (исправлен 2026-10-03):**
+- **Утечка внутреннего текста `ValueError` при невалидном UUID** в
+  `POST /admin/pricelists/{id}/retry` (отдавался `badly formed hexadecimal UUID string`).
+  Фикс: UUID парсится в эндпоинте (`404 CommonMessages.NOT_FOUND`), `PriceListService.retry`
+  принимает `uuid.UUID`; `ValueError` из сервиса теперь означает только неверный статус.
+
+## Smoke P2.5 (2026-10-03)
+
+Проверка наблюдаемости в docker compose (стек пересоздан `docker compose up -d backend worker`):
+
+- `docker compose ps` — backend и worker в статусе `healthy` (worker — exit code 0 по
+  `celery inspect ping`).
+- `GET /api/v1/health` опрашивается healthcheck'ом backend (`INFO ... "GET /api/v1/health" 200`).
+- Логи worker — JSON-строки: `{"timestamp", "level", "logger", "upload_id", "message"}`.
+  Проверка проброса `upload_id`: retry спецификации `f93ad9c7…` → воркер обработал
+  `specification.process`, все записи `app.worker.tasks` содержат
+  `"upload_id": "f93ad9c7-9af2-435d-adc7-384009781b19"` (старт, объём, прогресс,
+  завершение). `catalog.reembed` (без загрузки) пишет `upload_id: "-"`.
+- Логи backend остались в формате uvicorn (структурирование — только worker).
+- `GET /admin/pricelists` вернул `counts: {pending: 4, mapping_predicted: 0,
+  processing: 1, completed: 1, failed: 1}` — счётчик `failed` доступен и отображается
+  чипом в истории админки.
+- `ruff check app/` — чисто.
+
+**Дефект, найденный при smoke P2.5 (исправлен 2026-10-03):**
+- **JSON-записи worker не доходили до stdout.** Celery по умолчанию подменяет
+  `sys.stdout` на `LoggingProxy` (`worker_redirect_stdouts=True`), поэтому
+  `StreamHandler(sys.stdout)` писал в proxy, а не в реальный поток контейнера, и
+  записи терялись. Фикс: `worker_redirect_stdouts=False` в конфиге Celery (вместе с
+  `worker_hijack_root_logger=False`).
