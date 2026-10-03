@@ -47,6 +47,13 @@ class PriceListMessages:
         return f"Колонка «{column}» не найдена в файле прайс-листа"
 
 
+class CatalogMessages:
+    """Сообщения модуля каталога номенклатуры."""
+
+    NOT_FOUND = "Позиция каталога не найдена"
+    DUPLICATE = "Позиция с таким артикулом и наименованием уже существует"
+
+
 class SpecificationMessages:
     """Сообщения модуля спецификаций."""
 

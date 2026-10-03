@@ -138,6 +138,38 @@ def vectorize_catalog(self: Any, upload_id: str) -> dict:
     return _run_async(_run)
 
 
+@_celery_app.task(bind=True, name="catalog.reembed")
+def reembed_catalog_item(self: Any, item_id: str, name: str) -> dict:
+    """Пересчитать эмбеддинг позиции каталога после правки наименования админом.
+
+    Наименование передаётся аргументом: таска не зависит от момента коммита
+    правки в БД и всегда считает вектор по новому значению.
+    """
+
+    async def _run() -> dict:
+        from app.db.session import async_session_factory
+        from app.di.container import create_container
+        from app.repositories.catalog_repository import CatalogRepository
+        from app.services.embedding_service import EmbeddingService
+
+        container = create_container()
+        async with container() as c:
+            embedding_svc = await c.get(EmbeddingService)
+            embedding = embedding_svc.embed_passages([name])[0]
+
+            async with async_session_factory() as session:
+                catalog_repo = CatalogRepository(session)
+                item = await catalog_repo.get_by_id(UUID(item_id))
+                if item is None:
+                    return {"error": "item not found", "item_id": item_id}
+                await catalog_repo.update(item, {"embedding": list(embedding)})
+                await session.commit()
+
+        return {"item_id": item_id, "status": "reembedded"}
+
+    return _run_async(_run)
+
+
 @_celery_app.task(bind=True, name="specification.process")
 def process_specification(
     self: Any,

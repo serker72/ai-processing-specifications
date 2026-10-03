@@ -13,15 +13,16 @@ from typing import Annotated
 
 from dishka.integrations.fastapi import DishkaRoute, FromDishka
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile, status
+from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import get_current_admin
 from app.core.config import Settings
-from app.core.messages import CommonMessages
+from app.core.messages import CatalogMessages, CommonMessages
 from app.models.models import UploadStatus, User
 from app.repositories.session_repository import SessionRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.app_settings import AppSettingsResponse, AppSettingsUpdate
-from app.schemas.catalog import CatalogItemResponse, CatalogListResponse
+from app.schemas.catalog import CatalogItemResponse, CatalogItemUpdate, CatalogListResponse
 from app.schemas.client import ClientListResponse, ClientResponse, ClientUpdate
 from app.schemas.confirm_mapping import ConfirmMappingRequest, ConfirmMappingResponse
 from app.schemas.price_list import PriceListListResponse, PriceListPreviewResponse
@@ -31,7 +32,7 @@ from app.schemas.proposal_template import (
     ProposalTemplateUpdate,
 )
 from app.services.app_settings_service import AppSettingsService
-from app.services.catalog_service import CatalogService
+from app.services.catalog_service import CatalogItemNotFoundError, CatalogService
 from app.services.client_service import (
     ClientNotFoundError,
     ClientService,
@@ -39,7 +40,7 @@ from app.services.client_service import (
 from app.services.price_list_service import FileTooLargeError, PriceListService
 from app.services.proposal_template_service import ProposalTemplateService
 from app.services.security import SecurityService
-from app.worker.tasks import vectorize_catalog
+from app.worker.tasks import reembed_catalog_item, vectorize_catalog
 
 admin_router = APIRouter(route_class=DishkaRoute, prefix="/admin", tags=["admin"])
 
@@ -261,6 +262,59 @@ async def list_catalog(
         page=page,
         page_size=page_size,
     )
+
+
+@admin_router.patch(
+    "/catalog/{item_id}",
+    response_model=CatalogItemResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Изменить позицию каталога (наименование, единица, цена)",
+)
+async def update_catalog_item(
+    item_id: str,
+    payload: CatalogItemUpdate,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    catalog_service: FromDishka[CatalogService],
+) -> CatalogItemResponse:
+    """Обновить позицию каталога; при смене наименования эмбеддинг пересчитывается в фоне."""
+    await get_current_admin(request, settings, security_service, session_repository, user_repository)
+
+    import uuid
+
+    try:
+        parsed_id = uuid.UUID(item_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=CatalogMessages.NOT_FOUND
+        ) from None
+
+    try:
+        item, name_changed = await catalog_service.update_item(parsed_id, payload)
+    except CatalogItemNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except IntegrityError as e:
+        # Уникальность (sku, name): переименование в существующую позицию
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=CatalogMessages.DUPLICATE) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+    # Эмбеддинг строится по наименованию: после правки пересчитываем вектор в фоне,
+    # чтобы матчинг не остался на устаревшем значении. Commit до .delay(): воркер не
+    # должен выбрать задачу раньше, чем правка станет видна в базе.
+    if name_changed:
+        await catalog_service.commit_item()
+        reembed_catalog_item.delay(str(item.id), item.name)
+
+    return CatalogItemResponse.from_item(item)
 
 
 @admin_router.post(

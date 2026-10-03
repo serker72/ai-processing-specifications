@@ -30,6 +30,14 @@ class CatalogItemResponse(BaseModel):
         )
 
 
+class CatalogItemUpdate(BaseModel):
+    """Частичное обновление позиции каталога: передаются только изменяемые поля."""
+
+    name: str | None = Field(None, min_length=1, description="Наименование позиции")
+    unit: str | None = Field(None, description="Единица измерения")
+    price: float | None = Field(None, ge=0, description="Цена за единицу")
+
+
 class CatalogListResponse(BaseModel):
     """Страница позиций каталога."""
 

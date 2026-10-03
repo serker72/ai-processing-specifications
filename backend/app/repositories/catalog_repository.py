@@ -1,5 +1,6 @@
 """Репозиторий каталога: чтение номенклатуры и пакетная запись из прайс-листов."""
 
+import uuid
 from typing import Any
 
 from sqlalchemy import func, or_, select
@@ -40,6 +41,34 @@ class CatalogRepository:
             )
         result = await self._session.execute(statement)
         return int(result.scalar_one())
+
+    async def get_by_id(self, item_id: uuid.UUID) -> CatalogItem | None:
+        """Позиция каталога по ID."""
+        return await self._session.get(CatalogItem, item_id)
+
+    async def update(self, item: CatalogItem, values: dict[str, Any]) -> CatalogItem:
+        """Обновить переданные поля позиции каталога."""
+        for field, value in values.items():
+            setattr(item, field, value)
+        await self._session.flush()
+        await self._session.refresh(item)
+        return item
+
+    async def commit(self) -> None:
+        """Зафиксировать правку до постановки Celery-таски пересчёта эмбеддинга.
+
+        Иначе воркер может выбрать задачу раньше, чем unit-of-work запроса
+        завершится коммитом, и не найти позицию в базе.
+        """
+        await self._session.commit()
+
+    async def rollback(self) -> None:
+        """Откатить транзакцию после ошибки (например, нарушения уникальности).
+
+        Иначе сессия остаётся в состоянии PendingRollbackError и падает
+        уже на teardown dishka при попытке коммита.
+        """
+        await self._session.rollback()
 
     async def upsert_batch(self, items: list[dict[str, Any]]) -> int:
         """Пакетный UPSERT позиций каталога по уникальной паре (sku, name).
