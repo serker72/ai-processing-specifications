@@ -24,9 +24,10 @@
   `specifications/index.vue`); fail-fast конфиг (`JWT_SECRET_KEY`/`JWT_COOKIE_SECURE` вне
   `loc`, предупреждение о несовпадении CORS-домена). Проверка: `ruff check app/` и
   `npm run build` — успешно; docker-compose smoke пройден 2026-10-01 (см. ниже).
-- **P2** — шаг 3 ✅ (сделан ранее в `11085e3`); шаг 5 частично (`/api/v1/health` есть,
-  healthcheck backend/worker в compose нет); шаги 1, 2, 4, 6, 7 — не начаты.
-  Для шага 1: `weasyprint` в `pyproject.toml` есть, **`jinja2` нет** — добавить.
+- **P2** — шаг 1 (экспорт КП, P2.1.1–P2.1.8) ✅ выполнен 2026-10-02 (см. «Smoke P2.1»);
+  шаг 2 (редактирование каталога) ✅ выполнен 2026-10-03; шаг 3 ✅ (сделан ранее в
+  `11085e3`); шаг 5 частично (`/api/v1/health` есть, healthcheck backend/worker в compose
+  нет); шаги 4, 6, 7 — не начаты.
 - **Расхождение в документации:** `KODA.md` указывает `GET /health`, фактический маршрут —
   `/api/v1/health` (`main.py`, `api_prefix + "/health"`); исправить при ближайшей правке.
 
@@ -287,9 +288,16 @@ P0 закрыт: каталог наполняется (`vectorize_catalog` из
    (`application/pdf`, `%PDF-`), `force=true` добавляет версию под тем же номером
    (docs 1→2→3→4); смена статуса строки переключает `needs_regeneration=true`;
    режимы НДС (`vat_included=false/true`) отдают PDF. Логи backend без ошибок.
-2. **Редактирование каталога (админ).** Сейчас `GET /admin/catalog` read-only:
-   `PATCH /api/v1/admin/catalog/{item_id}` (price, unit, name) + форма на
-   `pages/admin/catalog.vue`. Правки цены не пересоздают эмбеддинг (он по наименованию).
+2. ✅ **Редактирование каталога (админ).** ГОТОВО 2026-10-03: `PATCH
+   /api/v1/admin/catalog/{item_id}` (`CatalogItemUpdate`: name/unit/price, частичное
+   обновление) — `CatalogService.update_item` + `CatalogRepository.get_by_id/update`,
+   `CatalogMessages` (`NOT_FOUND`, `DUPLICATE`); невалидный UUID → 404, дубликат
+   `(sku, name)` → 409. При смене наименования эмбеддинг пересчитывается фоновой таской
+   `catalog.reembed` (наименование передаётся аргументом — таска не зависит от момента
+   коммита правки); правки цены/единицы эмбеддинг не трогают. Frontend:
+   `pages/admin/catalog.vue` — инлайн-правка name/unit/price с кнопками сохранить/отмена.
+   Проверка: `ruff check app/` — чисто, `npm run build` — успешно; docker-compose smoke
+   пройден 2026-10-03 (см. «Smoke P2.2» ниже).
 3. ✅ **UI шаблонов КП: редактирование.** УЖЕ РЕАЛИЗОВАНО в `11085e3`: инлайн-правка
    (`startEdit`/`saveTemplate`) → `PATCH /admin/proposal-templates/{id}` на
    `pages/admin/proposal-templates.vue`.
@@ -306,3 +314,23 @@ P0 закрыт: каталог наполняется (`vectorize_catalog` из
    (сессии в Redis), но: вынести `JWT_COOKIE_SECURE`/`JWT_COOKIE_DOMAIN` в чеклист
    прод-развёртывания в README; рассмотреть `SameSite=Lax`→`Strict` для refresh-куки
    после проверки, что refresh не вызывается кросс-сайтово.
+
+## Smoke P2.2 (2026-10-03)
+
+Проверка редактирования каталога в docker compose (стек поднят, миграции на `a5e6f7b8c9d0`):
+`GET /admin/catalog` отдал 18 позиций; `PATCH /admin/catalog/{item_id}` сменил
+наименование/единицу/цену (SKU003: name/unit/price обновлены в ответе и БД), воркер
+обработал `catalog.reembed` (эмбеддинг 768-dim изменился: `2d36a7ea…` → `d29d1158…`);
+`PATCH` только цены таску не ставит; невалидный UUID и несуществующий ID → 404;
+переименование в существующую пару `(sku, name)` → 409; успешный `PATCH` после 409
+работает (сессия не сломана). Логи backend/worker без ошибок.
+
+**Дефект, найденный при smoke P2.2 (исправлен 2026-10-03):**
+- **`PendingRollbackError` при 409.** При нарушении уникальности `(sku, name)` SQLAlchemy
+  оставлял сессию в состоянии `PendingRollbackError`, и teardown dishka падал с
+  `dishka.exceptions.ExitError` уже после формирования ответа 409. Фикс: `CatalogRepository.rollback()`
+  и откат сессии в `CatalogService.update_item` при `IntegrityError` — после этого 409
+  отдаётся без ошибок в логах, сессия остаётся работоспособной.
+- **Гонка с Celery-таской `catalog.reembed`.** Правка коммитилась только в teardown
+  запроса, а `.delay()` ставился раньше — воркер мог не найти позицию. Фикс:
+  `CatalogService.commit_item()` (коммит до `.delay()`), по аналогии с `commit_upload`.
