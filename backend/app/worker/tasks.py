@@ -5,6 +5,9 @@
 подписчикам SSE и списку загрузок ещё до окончания обработки файла.
 Статусы загрузки берутся только из `UploadStatus` — `RowStatus` описывает
 строку и к статусу файла отношения не имеет.
+
+Задача 3.1: таска `pricelist.predict_mapping` отвечает за предсказание маппинга
+колонок прайс-листа (LLM) — вынесена из HTTP-запроса.
 """
 
 import asyncio
@@ -13,7 +16,7 @@ from typing import Any
 from uuid import UUID
 
 from app.core.logging_config import upload_id_var
-from app.schemas.sse_events import ProgressEvent, RowMatchEvent
+from app.schemas.sse_events import PriceListStatusEvent, ProgressEvent, RowMatchEvent
 from app.worker import celery_app
 
 logger = logging.getLogger(__name__)
@@ -51,6 +54,71 @@ def _json_value(value: Any) -> Any:
     if value is None or isinstance(value, bool | int | float | str):
         return value
     return str(value)
+
+
+@_celery_app.task(bind=True, name="pricelist.predict_mapping")
+def predict_pricelist_mapping(self: Any, upload_id: str) -> dict:
+    """Предсказание маппинга колонок прайс-листа через LLM (задача 3.1).
+
+    Вынесено из HTTP-запроса загрузки: POST /admin/pricelists сразу возвращает
+    202, анализ выполняет эта таска. Переходы статусов
+    pending → mapping_processing → mapping_predicted | failed — в сервисе;
+    здесь — публикация событий в SSE-канал pricelist_{upload_id} и терминальное
+    событие (completed / error) последним.
+    """
+
+    async def _run() -> dict:
+        from app.core.messages import PriceListMessages
+        from app.di.container import create_container
+        from app.services.price_list_service import PriceListService
+        from app.worker.redis_pubsub import RedisPubSub
+
+        logger.info("Предсказание маппинга прайс-листа: старт")
+        container = create_container()
+        redis_pubsub = RedisPubSub()
+        channel = f"pricelist_{upload_id}"
+
+        # Номер события: единая нумерация для буфера Redis и live-ленты (дедупликация SSE)
+        seq_counter = 0
+
+        def next_seq() -> int:
+            nonlocal seq_counter
+            seq_counter += 1
+            return seq_counter
+
+        async def publish(status: str, message: str) -> None:
+            """Опубликовать событие статуса прайс-листа (с кладкой в буфер для поздних подписчиков)."""
+            await redis_pubsub.publish(
+                channel,
+                PriceListStatusEvent(
+                    upload_id=upload_id,
+                    seq=next_seq(),
+                    status=status,
+                    message=message,
+                ).model_dump_json(),
+                buffered=True,
+            )
+
+        try:
+            async with container() as c:
+                price_list_svc = await c.get(PriceListService)
+                await publish("mapping_processing", PriceListMessages.MAPPING_PROCESSING)
+                result = await price_list_svc.predict_mapping(upload_id)
+                await publish("mapping_predicted", PriceListMessages.MAPPING_READY)
+                logger.info("Предсказание маппинга прайс-листа: завершено")
+                return result
+        except Exception:
+            await publish("error", PriceListMessages.MAPPING_FAILED)
+            logger.exception("Предсказание маппинга прайс-листа: ошибка, статус failed")
+            raise
+        finally:
+            await redis_pubsub.close()
+
+    token = upload_id_var.set(upload_id)
+    try:
+        return _run_async(_run)
+    finally:
+        upload_id_var.reset(token)
 
 
 @_celery_app.task(bind=True, name="catalog.vectorize")

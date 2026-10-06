@@ -8,11 +8,14 @@
 после 1 МБ уходит на диск): не читается в память целиком.
 """
 
+import asyncio
+import json
 from datetime import date
 from typing import Annotated
 
 from dishka.integrations.fastapi import DishkaRoute, FromDishka
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import get_current_admin
@@ -40,7 +43,7 @@ from app.services.client_service import (
 from app.services.price_list_service import FileTooLargeError, PriceListService
 from app.services.proposal_template_service import ProposalTemplateService
 from app.services.security import SecurityService
-from app.worker.tasks import reembed_catalog_item, vectorize_catalog
+from app.worker.tasks import predict_pricelist_mapping, reembed_catalog_item, vectorize_catalog
 
 admin_router = APIRouter(route_class=DishkaRoute, prefix="/admin", tags=["admin"])
 
@@ -242,6 +245,83 @@ async def preview_pricelist(
 
 
 @admin_router.get(
+    "/pricelists/{upload_id}/stream",
+    summary="SSE-поток статусов обработки прайс-листа",
+)
+async def stream_pricelist_status(
+    upload_id: str,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+) -> StreamingResponse:
+    """SSE-эндпоинт: real-time статусы LLM-маппинга колонок прайс-листа.
+
+    Клиент подписывается на Redis Pub/Sub канал `pricelist_{upload_id}` и получает
+    события статусов (mapping_processing / mapping_predicted / error).
+    Терминальные события (mapping_predicted / error) закрывают поток на стороне клиента.
+    """
+    await get_current_admin(request, settings, security_service, session_repository, user_repository)
+
+    from app.worker.redis_pubsub import RedisPubSub
+
+    channel = f"pricelist_{upload_id}"
+    redis_pubsub = RedisPubSub()
+
+    async def event_generator():
+        """Генератор SSE-событий: воспроизведение буфера Redis, затем live-подписка."""
+        pubsub = None
+        try:
+            pubsub = await redis_pubsub.subscribe(channel)
+
+            def take(raw: str) -> bool:
+                """Пропустить событие с seq <= последнего отправленного (дедупликация)."""
+                nonlocal last_seq
+                try:
+                    seq = json.loads(raw).get("seq")
+                except (ValueError, AttributeError):
+                    return True
+                if seq is None:
+                    return True
+                if seq <= last_seq:
+                    return False
+                last_seq = int(seq)
+                return True
+
+            last_seq = 0
+            for raw in await redis_pubsub.buffered_events(channel):
+                if take(raw):
+                    yield f"data: {raw}\n\n"
+
+            while True:
+                if await request.is_disconnected():
+                    break
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if message and message["type"] == "message":
+                    data = message["data"]
+                    if take(data):
+                        yield f"data: {data}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if pubsub:
+                await pubsub.unsubscribe(channel)
+                await pubsub.close()
+            await redis_pubsub.close()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Отключить буферизацию nginx
+        },
+    )
+
+
+@admin_router.get(
     "/catalog",
     response_model=CatalogListResponse,
     status_code=status.HTTP_200_OK,
@@ -325,8 +405,8 @@ async def update_catalog_item(
 
 @admin_router.post(
     "/pricelists",
-    status_code=status.HTTP_201_CREATED,
-    summary="Загрузить прайс-лист: сохранить в MinIO, превью, LLM-маппинг колонок",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Загрузить прайс-лист: сохранить в MinIO, вернуть upload_id для отслеживания",
 )
 async def upload_pricelist(
     file: Annotated[UploadFile, File(...)],
@@ -337,14 +417,14 @@ async def upload_pricelist(
     user_repository: FromDishka[UserRepository],
     price_list_service: FromDishka[PriceListService],
 ) -> dict:
-    """Загрузить Excel-прайс-лист: потоковая загрузка в MinIO, превью 50 строк, LLM-маппинг колонок."""
+    """Загрузить Excel-прайс-лист: потоковая загрузка в MinIO, статус 202 + enqueue LLM-маппинга."""
     admin: User = await get_current_admin(request, settings, security_service, session_repository, user_repository)
 
     if not file.filename or not file.filename.endswith(".xlsx"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=CommonMessages.VALIDATION_ERROR)
 
     try:
-        result = await price_list_service.upload_and_predict(
+        result = await price_list_service.create_upload(
             fileobj=file.file,
             original_filename=file.filename,
             admin_id=admin.id,
@@ -358,6 +438,11 @@ async def upload_pricelist(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=CommonMessages.INTERNAL_ERROR,
         ) from e
+
+    # Commit до .delay(): воркер не должен выбрать задачу раньше, чем
+    # запись upload станет видна в базе.
+    await price_list_service.commit_upload()
+    predict_pricelist_mapping.delay(result["upload_id"])
 
     return result
 

@@ -43,6 +43,9 @@ class PriceListMessages:
     UPLOAD_NOT_FOUND = "Загрузка прайс-листа не найдена"
     RETRY_NOT_FAILED = "Повторить обработку можно только для загрузки со статусом «Ошибка»"
     NO_MAPPING = "Маппинг колонок прайс-листа не подтверждён"
+    MAPPING_PROCESSING = "LLM определяет роли колонок"
+    MAPPING_READY = "Маппинг колонок предсказан, ожидает подтверждения"
+    MAPPING_FAILED = "Не удалось предсказать маппинг колонок"
 
     @staticmethod
     def column_not_in_file(column: str) -> str:

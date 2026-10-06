@@ -26,3 +26,20 @@ class ProgressEvent(BaseModel):
     total: int
     status: str = Field(..., description="pending / processing / completed / error")
     message: str = Field(..., description="Сообщение о статусе")
+
+
+class PriceListStatusEvent(BaseModel):
+    """Событие статуса обработки прайс-листа (маппинг колонок, векторизация).
+
+    Прогресса в числах у этих этапов нет (maппинг — один LLM-запрос), поэтому
+    событие несёт только статус; терминальные значения — completed / error,
+    по ним клиент закрывает поток и обновляет данные.
+    """
+
+    upload_id: str
+    seq: int | None = Field(None, description="Порядковый номер события (дедупликация буфера и live-ленты)")
+    status: str = Field(
+        ...,
+        description="mapping_processing / mapping_predicted / processing / completed / error",
+    )
+    message: str = Field(..., description="Сообщение о статусе")

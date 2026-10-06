@@ -97,6 +97,7 @@ class UploadStatus(str, enum.Enum):
     """Статус обработки загруженного файла."""
 
     pending = "pending"
+    mapping_processing = "mapping_processing"
     mapping_predicted = "mapping_predicted"
     processing = "processing"
     completed = "completed"
