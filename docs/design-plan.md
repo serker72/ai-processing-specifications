@@ -83,20 +83,11 @@
 * LLM возвращает Pydantic-схему ролей колонок (Где артикул? Где название? Где цена?).
 * Возврат предложенного маппинга на фронтенд для ручного подтверждения администратором.
 
-* ⚠️ **Требуется доработка (архитектура): LLM-маппинг вынести из HTTP-запроса в фоновую задачу.**
-  Сейчас `POST /api/v1/admin/pricelists` синхронно вызывает LLM, из-за чего запрос блокируется
-  на всё время анализа (на CPU-модели реальный замер — ~126 640 мс для широкого прайса).
-  Правильно:
-  * загрузить файл в MinIO и сразу создать запись `PriceListUpload` со статусом `created`
-    (или переиспользовать `pending`), вернуть `202 Accepted` с `upload_id` без ожидания LLM;
-  * предсказание маппинга выполнять в Celery-таске (`pricelist.predict_mapping`) —
-    по аналогии с векторизацией каталога (Задача 3.2) и обработкой спецификаций (Задача 5.2);
-  * добавить промежуточный статус `mapping_processing` (в `UploadStatus`) на время анализа,
-    по завершении — `mapping_predicted` / `failed`;
-  * фронтенд опрашивает статус загрузки (polling, как для `processing`) и показывает превью
-    с маппингом после готовности.
-  Затрагивает: `UploadStatus`, `PriceListService.upload_and_predict`, `api/v1/admin.py`,
-  `worker/tasks.py`, страницу `admin/pricelists/[uploadId].vue`.
+* **✅ Реализация:**
+  * ✅ Эндпоинт `POST /api/v1/admin/pricelists` загружает файл в MinIO и возвращает `202 Accepted` с `upload_id` без ожидания LLM.
+  * ✅ Celery-таска `pricelist.predict_mapping` выполняет LLM-анализ асинхронно (в фоне).
+  * ✅ Статус `mapping_processing` (в `UploadStatus`) публикуется на время анализа, по завершении — `mapping_predicted` / `failed`.
+  * ✅ SSE-поток `GET /api/v1/admin/pricelists/{upload_id}/stream` — фронтенд показывает превью с маппингом после события готовности.
 
 
 
@@ -115,11 +106,18 @@
   * ✅ Celery-таска `catalog.vectorize` (`app/worker/tasks.py`): читает прайс из MinIO через `PriceListService.parse_pricelist` по подтверждённому `column_mapping`, батчи по 500 строк, эмбеддинги `EmbeddingService` (`intfloat/multilingual-e5-base`, 768-dim), UPSERT в `CatalogItem`.
   * ⚠️ **Исправлено: чтение файла из MinIO только через `MinioService`.** `parse_pricelist` вызывал клиент S3 напрямую с сырым ключом, тогда как при загрузке ключ URL-кодируется (`quote`). Для имён с пробелами/кириллицей (`pricelists/…-260906 Прайс.xlsx`) `HeadObject` возвращал 404, и таска помечала загрузку `failed`. Теперь используется `MinioService.download_fileobj` (кодирует ключ). Правило: не обращаться к `_get_client()`/`_bucket` из других сервисов — только через методы `MinioService`.
 
-* ⚠️ **Требуется доработка: индикация процесса векторизации прайс-листа (без процентов).**
+* ⚠️ **Требуется доработка: SSE-индикация процесса векторизации прайс-листа (без процентов) + отдельное событие завершения.**
   Сейчас у загрузки прайса нет видимого прогресса: показывается только статус
   `processing`, а таска `catalog.vectorize` пишет прогресс лишь в лог
   (`logger.info("обработано %d/%d")`). Нужен индикатор вида **«5000 / 75 000 записей»**
-  (абсолютные числа, не проценты):
+  (абсолютные числа, не проценты), доставляемый через SSE-поток
+  (`text/event-stream`) по аналогии с уже работающим потоком спецификаций
+  (`GET /api/v1/manager/specifications/{upload_id}/stream`): тот же `RedisPubSub` с буфером
+  (`buffered=True`, `EVENT_BUFFER_MAX`, TTL), дедупликация по `seq`, воспроизведение буфера
+  при (пере)подключении. Обоснование против WebSocket: только сервер→клиент, не нужны
+  двунаправленность и свой протокол; SSE переиспользует существующий код (`RedisPubSub`,
+  `StreamingResponse`) и проходит через nginx без доп. настройки upgrade. Прямое подключение
+  браузера к Redis Pub/Sub невозможно.
   * `catalog.vectorize` публикует прогресс после каждого батча (по аналогии с
     `specification.process` → `RedisPubSub.publish(..., buffered=True)`), событие
     содержит `processed` / `total`;
@@ -127,33 +125,17 @@
     `app/schemas/sse_events.py`) с полями `upload_id`, `seq`, `processed`, `total`,
     `status` (`processing` / `completed` / `error`);
   * `total` известен после `parse_pricelist`; до этого — событие «подготовка» без чисел;
+  * **отдельное событие завершения** (`status: completed` / `error`) — чтобы клиент не
+    инферил завершение из статусов, а явно закрывал поток и обновлял данные; публикуется
+    последним (как `ProgressEvent` в `specification.process`);
+  * **frontend сам решает, что отображать**: composable (аналог `useSpecStream`)
+    принимает поток, а страница решает, показывать ли лог/индикатор/тост — события не
+    навязывают UI. Для прайсов достаточно индикатора прогресса + тоста о завершении;
   * отображать счётчик в списке загрузок (`admin/pricelists/index.vue`) и/или на странице
     маппинга (`admin/pricelists/[uploadId].vue`).
+  * Эндпоинт: `GET /api/v1/admin/pricelists/{upload_id}/stream`.
   Затрагивает: `worker/tasks.py`, `schemas/sse_events.py`, `api/v1/admin.py`,
-  `admin/pricelists/*.vue`.
-
-* ⚠️ **Требуется доработка: заменить polling на события (SSE) + отдельное событие завершения.**
-  Сейчас фронтенд прайсов узнаёт о статусах через polling каждые 5 с
-  (`admin/pricelists/index.vue`, `manager/uploads.vue`) — лишние запросы, задержка до 5 с и
-  опрос «вхолостую». Заменить на серверный поток событий:
-  * **Предлагаемый вариант — SSE** (`text/event-stream`) по аналогии с уже работающим
-    потоком спецификаций (`GET /api/v1/manager/specifications/{upload_id}/stream`): тот же
-    `RedisPubSub` с буфером (`buffered=True`, `EVENT_BUFFER_MAX`, TTL), дедупликация по `seq`,
-    воспроизведение буфера при (пере)подключении. Обоснование против WebSocket: только
-    сервер→клиент, не нужны двунаправленность и свой протокол; SSE переиспользует
-    существующий код (`RedisPubSub`, `StreamingResponse`) и проходит через nginx без
-    доп. настройки upgrade. Прямое подключение браузера к Redis Pub/Sub невозможно.
-  * **Отдельное событие завершения** (`status: completed` / `error`) — чтобы клиент не
-    инферил завершение из статусов, а явно закрывал поток и обновлял данные; публикуется
-    последним (как `ProgressEvent` в `specification.process`).
-  * **Frontend сам решает, что отображать**: composable (аналог `useSpecStream`)
-    принимает поток, а страница решает, показывать ли лог/индикатор/тост — события не
-    навязывают UI. Для прайсов достаточно индикатора прогресса + тоста о завершении.
-  * Эндпоинты: `GET /api/v1/admin/pricelists/{upload_id}/stream` (и, при необходимости,
-    `GET /api/v1/manager/specifications/{upload_id}/stream` уже есть). Polling-фолбэк можно
-    оставить как страховку при обрыве потока.
-  Затрагивает: `api/v1/admin.py`, `worker/tasks.py`, `schemas/sse_events.py`,
-  `admin/pricelists/index.vue`, `manager/uploads.vue`, `composables/` (общий стрим-хелпер).
+  `admin/pricelists/*.vue`, `manager/uploads.vue`, `composables/` (общий стрим-хелпер).
 
 ---
 
@@ -202,7 +184,7 @@
     Задача 5.2);
   * промежуточный статус `mapping_processing` (в `UploadStatus`) на время анализа, далее
     `mapping_predicted` / `failed`;
-  * фронтенд опрашивает статус загрузки и показывает превью с маппингом после готовности.
+  * фронтенд подписывается на SSE-поток и показывает превью с маппингом после готовности.
   Затрагивает: `UploadStatus`, `SpecificationService`, `api/v1/manager.py`, `worker/tasks.py`,
   `manager/specifications/index.vue`.
 
