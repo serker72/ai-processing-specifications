@@ -20,13 +20,8 @@
           {{ isUploading ? 'Загрузка...' : 'Загрузить' }}
         </button>
       </div>
-
-      <div v-if="uploadResult" class="result">
-        <p>Upload ID: <code>{{ uploadResult.upload_id }}</code></p>
-        <p>Файл в хранилище: <code>{{ uploadResult.file_key }}</code></p>
-      </div>
       <p class="text-muted text-sm mt-2">
-        После загрузки backend строит превью листа и предсказывает маппинг колонок;
+        После загрузки backend предсказывает маппинг колонок (LLM);
         подтверждение маппинга выполняется отдельно, статус виден в истории ниже.
       </p>
     </div>
@@ -79,7 +74,7 @@
               </td>
               <td class="table-actions">
                 <NuxtLink
-                  v-if="upload.status === 'mapping_predicted' || upload.status === 'failed'"
+                  v-if="['mapping_predicted', 'mapping_processing', 'failed'].includes(upload.status)"
                   :to="`/admin/pricelists/${upload.id}`"
                   class="btn-action btn-mapping"
                 >
@@ -132,8 +127,8 @@
 <script setup lang="ts">
 /**
  * Прайс-листы: загрузка Excel (POST /admin/pricelists) и история загрузок
- * (GET /admin/pricelists). Статусы обработки приходят из backend —
- * pending / processing / mapping_predicted / completed / failed.
+ * (GET /admin/pricelists). Статусы обработки:
+ * pending → mapping_processing → mapping_predicted → processing → completed | failed.
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
@@ -158,7 +153,6 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const selectedFile = ref<File | null>(null)
 const isUploading = ref(false)
 const isLoading = ref(false)
-const uploadResult = ref<any>(null)
 const uploads = ref<PriceListUpload[]>([])
 const counts = ref<Record<string, number>>({})
 const statusFilter = ref('')
@@ -175,6 +169,7 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 /** Подписи статусов UploadStatus для чипов фильтра. */
 const STATUS_LABELS: Record<string, string> = {
   pending: 'Ожидает',
+  mapping_processing: 'Анализирует LLM',
   mapping_predicted: 'Ждёт маппинг',
   processing: 'Обрабатывается',
   completed: 'Готов',
@@ -239,7 +234,9 @@ function goToPage(target: number) {
 /** Фоновое обновление, пока есть загрузки в обработке. */
 function pollProcessing() {
   const hasProcessing =
-    (counts.value.processing ?? 0) > 0 || uploads.value.some((u) => u.status === 'processing')
+    (counts.value.processing ?? 0) > 0 ||
+    (counts.value.mapping_processing ?? 0) > 0 ||
+    uploads.value.some((u) => u.status === 'processing' || u.status === 'mapping_processing')
   if (hasProcessing) {
     loadUploads(true)
   }
@@ -269,19 +266,18 @@ async function handleUpload() {
   }
 
   isUploading.value = true
-  uploadResult.value = null
   try {
     // FormData, а не JSON: backend читает файл как multipart (UploadFile).
     const formData = new FormData()
     formData.append('file', selectedFile.value)
-    uploadResult.value = await $api('/admin/pricelists', { method: 'POST', body: formData })
+    const result = await $api('/admin/pricelists', { method: 'POST', body: formData })
     selectedFile.value = null
     if (fileInput.value) {
       fileInput.value.value = ''
     }
-    toast.success('Прайс-лист загружен, ожидает подтверждения маппинга')
-    page.value = 1
-    await loadUploads()
+    toast.success('Прайс-лист загружен, LLM анализирует…')
+    // После загрузки (202) сразу переходим на страницу маппинга
+    await navigateTo(`/admin/pricelists/${result.upload_id}`)
   } catch (err: any) {
     toast.fromError(err, 'Не удалось загрузить прайс-лист')
   } finally {

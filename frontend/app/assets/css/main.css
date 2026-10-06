@@ -479,10 +479,12 @@ code {
 }
 
 /* processing — «в работе» (информационный), upcoming — ожидающийся шаблон КП,
-   mapping_predicted — маппинг колонок предсказан LLM, ждёт обработки. */
+   mapping_predicted — маппинг колонок предсказан LLM, ждёт обработки,
+   mapping_processing — LLM определяет роли колонок (фоновая таска). */
 .status-badge.processing,
 .status-badge.upcoming,
-.status-badge.mapping_predicted {
+.status-badge.mapping_predicted,
+.status-badge.mapping_processing {
   background: var(--app-info-bg);
   color: var(--app-info-fg);
 }

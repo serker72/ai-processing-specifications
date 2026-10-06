@@ -6,13 +6,22 @@
 
     <h1>Маппинг колонок</h1>
 
-    <div v-if="isLoading" class="empty-state">Загрузка превью…</div>
+    <!-- Ожидание LLM-предсказания: показываем статус и подписываемся на SSE -->
+    <div v-if="isMappingProcessing" class="upload-section">
+      <div class="form-actions">
+        <h3 class="flex-1">{{ preview?.filename || 'Загрузка…' }}</h3>
+        <span class="status-badge mapping_processing">Анализирует LLM</span>
+      </div>
+      <p class="text-muted text-sm mt-2">{{ streamMessage }}</p>
+    </div>
+
+    <div v-else-if="isLoading" class="empty-state">Загрузка превью…</div>
 
     <template v-else-if="preview">
       <div class="upload-section">
         <div class="form-actions">
           <h3 class="flex-1">{{ preview.filename }}</h3>
-          <span class="status-badge" :class="preview.status">{{ preview.status }}</span>
+          <span class="status-badge" :class="preview.status">{{ statusLabel(preview.status) }}</span>
         </div>
         <p class="text-muted text-sm mt-2">
           Лист: {{ preview.sheets[0] || '—' }} · колонок: {{ preview.headers.length }} ·
@@ -124,8 +133,12 @@
  * GET /admin/pricelists/{id}/preview — превью файла и сохранённый (предсказанный LLM)
  * column_mapping; POST /admin/pricelists/{id}/confirm — подтверждённый маппинг,
  * после которого backend запускает векторизацию каталога.
+ *
+ * Если загрузка в статусе pending или mapping_processing — страница подписывается
+ * на SSE-поток и ждёт терминальное событие (mapping_predicted / error),
+ * после чего перезагружает превью.
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { ColumnAssignment } from '~/utils/pricelist'
 
 definePageMeta({ layout: 'workspace' })
@@ -145,6 +158,23 @@ interface PriceListPreview {
 /** Статусы, в которых админ может подтвердить маппинг. */
 const EDITABLE_STATUSES = ['mapping_predicted', 'failed']
 
+/** Статусы, в которых LLM-предсказание ещё выполняется. */
+const PENDING_STATUSES = ['pending', 'mapping_processing']
+
+/** Подписи статусов для отображения. */
+const STATUS_LABELS: Record<string, string> = {
+  pending: 'Ожидает',
+  mapping_processing: 'Анализирует LLM',
+  mapping_predicted: 'Ждёт маппинг',
+  processing: 'Обрабатывается',
+  completed: 'Готов',
+  failed: 'Ошибка',
+}
+
+function statusLabel(status: string) {
+  return STATUS_LABELS[status] || status
+}
+
 /** Сколько непустых значений колонки показывать в подсказке. */
 const SAMPLE_SIZE = 3
 
@@ -160,6 +190,11 @@ const isSaving = ref(false)
 
 const isEditable = computed(() =>
   Boolean(preview.value && EDITABLE_STATUSES.includes(preview.value.status)),
+)
+
+/** LLM-предсказание ещё выполняется — показываем индикатор ожидания. */
+const isMappingProcessing = computed(() =>
+  Boolean(preview.value && PENDING_STATUSES.includes(preview.value.status)),
 )
 
 const payload = computed(() => buildMappingPayload(assignments.value))
@@ -252,5 +287,85 @@ async function saveMapping() {
   }
 }
 
-onMounted(loadPreview)
+// --- SSE-подписка на статусы LLM-маппинга ---
+
+const config = useRuntimeConfig()
+const { $authRefresh } = useNuxtApp() as any
+
+const streamMessage = ref('LLM определяет роли колонок…')
+let eventSource: EventSource | null = null
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let streamAttempt = 0
+let lastSeq = 0
+
+function cleanupStream() {
+  if (eventSource) {
+    eventSource.close()
+    eventSource = null
+  }
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+}
+
+function openStream() {
+  eventSource = new EventSource(`${config.public.apiBase}/admin/pricelists/${uploadId}/stream`, {
+    withCredentials: true,
+  })
+
+  eventSource.onmessage = (event) => {
+    let data: any
+    try {
+      data = JSON.parse(event.data)
+    } catch {
+      return
+    }
+    // Дедупликация по seq
+    if (typeof data.seq === 'number') {
+      if (data.seq <= lastSeq) return
+      lastSeq = data.seq
+    }
+
+    const status = String(data.status ?? '')
+    streamMessage.value = data.message || ''
+
+    // Терминальные события — закрываем поток и обновляем превью
+    if (status === 'mapping_predicted' || status === 'error') {
+      cleanupStream()
+      if (status === 'error') {
+        toast.error(data.message || 'Не удалось предсказать маппинг колонок')
+      } else {
+        toast.success('Маппинг колонок готов')
+      }
+      loadPreview()
+    }
+  }
+
+  eventSource.onerror = () => {
+    cleanupStream()
+    // Переподключение с backoff (только пока LLM-предсказание не завершилось)
+    if (preview.value && !PENDING_STATUSES.includes(preview.value.status)) return
+    const delay = Math.min(1000 * 2 ** streamAttempt, 15000)
+    streamAttempt += 1
+    reconnectTimer = setTimeout(async () => {
+      try {
+        await $authRefresh?.()
+      } catch {
+        /* не критично */
+      }
+      openStream()
+    }, delay)
+  }
+}
+
+onMounted(async () => {
+  await loadPreview()
+  // Если LLM-предсказание ещё выполняется — подписываемся на SSE
+  if (preview.value && PENDING_STATUSES.includes(preview.value.status)) {
+    openStream()
+  }
+})
+
+onBeforeUnmount(cleanupStream)
 </script>
