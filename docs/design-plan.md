@@ -104,38 +104,16 @@
 
 * **✅ Реализация:**
   * ✅ Celery-таска `catalog.vectorize` (`app/worker/tasks.py`): читает прайс из MinIO через `PriceListService.parse_pricelist` по подтверждённому `column_mapping`, батчи по 500 строк, эмбеддинги `EmbeddingService` (`intfloat/multilingual-e5-base`, 768-dim), UPSERT в `CatalogItem`.
-  * ⚠️ **Исправлено: чтение файла из MinIO только через `MinioService`.** `parse_pricelist` вызывал клиент S3 напрямую с сырым ключом, тогда как при загрузке ключ URL-кодируется (`quote`). Для имён с пробелами/кириллицей (`pricelists/…-260906 Прайс.xlsx`) `HeadObject` возвращал 404, и таска помечала загрузку `failed`. Теперь используется `MinioService.download_fileobj` (кодирует ключ). Правило: не обращаться к `_get_client()`/`_bucket` из других сервисов — только через методы `MinioService`.
+* ⚠️ **Исправлено: чтение файла из MinIO только через `MinioService`.** `parse_pricelist` вызывал клиент S3 напрямую с сырым ключом, тогда как при загрузке ключ URL-кодируется (`quote`). Для имён с пробелами/кириллицей (`pricelists/…-260906 Прайс.xlsx`) `HeadObject` возвращал 404, и таска помечала загрузку `failed`. Теперь используется `MinioService.download_fileobj` (кодирует ключ). Правило: не обращаться к `_get_client()`/`_bucket` из других сервисов — только через методы `MinioService`.
 
-* ⚠️ **Требуется доработка: SSE-индикация процесса векторизации прайс-листа (без процентов) + отдельное событие завершения.**
-  Сейчас у загрузки прайса нет видимого прогресса: показывается только статус
-  `processing`, а таска `catalog.vectorize` пишет прогресс лишь в лог
-  (`logger.info("обработано %d/%d")`). Нужен индикатор вида **«5000 / 75 000 записей»**
-  (абсолютные числа, не проценты), доставляемый через SSE-поток
-  (`text/event-stream`) по аналогии с уже работающим потоком спецификаций
-  (`GET /api/v1/manager/specifications/{upload_id}/stream`): тот же `RedisPubSub` с буфером
-  (`buffered=True`, `EVENT_BUFFER_MAX`, TTL), дедупликация по `seq`, воспроизведение буфера
-  при (пере)подключении. Обоснование против WebSocket: только сервер→клиент, не нужны
-  двунаправленность и свой протокол; SSE переиспользует существующий код (`RedisPubSub`,
-  `StreamingResponse`) и проходит через nginx без доп. настройки upgrade. Прямое подключение
-  браузера к Redis Pub/Sub невозможно.
-  * `catalog.vectorize` публикует прогресс после каждого батча (по аналогии с
-    `specification.process` → `RedisPubSub.publish(..., buffered=True)`), событие
-    содержит `processed` / `total`;
-  * отдельная схема события для прайса (например, `PriceListProgressEvent` в
-    `app/schemas/sse_events.py`) с полями `upload_id`, `seq`, `processed`, `total`,
-    `status` (`processing` / `completed` / `error`);
-  * `total` известен после `parse_pricelist`; до этого — событие «подготовка» без чисел;
-  * **отдельное событие завершения** (`status: completed` / `error`) — чтобы клиент не
-    инферил завершение из статусов, а явно закрывал поток и обновлял данные; публикуется
-    последним (как `ProgressEvent` в `specification.process`);
-  * **frontend сам решает, что отображать**: composable (аналог `useSpecStream`)
-    принимает поток, а страница решает, показывать ли лог/индикатор/тост — события не
-    навязывают UI. Для прайсов достаточно индикатора прогресса + тоста о завершении;
-  * отображать счётчик в списке загрузок (`admin/pricelists/index.vue`) и/или на странице
-    маппинга (`admin/pricelists/[uploadId].vue`).
-  * Эндпоинт: `GET /api/v1/admin/pricelists/{upload_id}/stream`.
-  Затрагивает: `worker/tasks.py`, `schemas/sse_events.py`, `api/v1/admin.py`,
-  `admin/pricelists/*.vue`, `manager/uploads.vue`, `composables/` (общий стрим-хелпер).
+* **✅ Реализовано: SSE-индикация процесса векторизации прайс-листа (без процентов) + отдельное событие завершения.**
+  * `catalog.vectorize` публикует прогресс после каждого батча через `RedisPubSub.publish(..., buffered=True)`, событие содержит `processed` / `total`;
+  * `PriceListProgressEvent` в `app/schemas/sse_events.py` с полями `upload_id`, `seq`, `processed`, `total`, `status` (`processing` / `completed` / `error`);
+  * `total` известен после `parse_pricelist`; до этого — событие «подготовка» без чисел (`processed=total=None`);
+  * **отдельное событие завершения** (`status: completed` / `error`) — публикуется последним, клиент по нему закрывает поток и обновляет данные;
+  * общий счётчик `seq` (Redis INCR) на канал `pricelist_{upload_id}` — нумерация монотонна между тасками LLM-маппинга и векторизации;
+  * composable `useSseStream` (общий стрим-хелпер) + `useSpecStream` (тонкая обёртка) — `frontend` сам решает, что отображать;
+  * на странице `/admin/pricelists` показывается индикатор прогресса «5 000 / 75 000 записей» (подписка только на статус `processing`) + тост о завершении/ошибке.
 
 ---
 
