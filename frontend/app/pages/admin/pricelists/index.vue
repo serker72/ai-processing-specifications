@@ -71,6 +71,10 @@
               <td>{{ formatDateTime(upload.created_at) }}</td>
               <td>
                 <span class="status-badge" :class="upload.status">{{ statusLabel(upload.status) }}</span>
+                <!-- Счётчик векторизации из SSE-потока («5 000 / 75 000 записей») -->
+                <span v-if="progress[upload.id]" class="progress-counter">
+                  {{ progress[upload.id] }}
+                </span>
               </td>
               <td class="table-actions">
                 <NuxtLink
@@ -129,8 +133,11 @@
  * Прайс-листы: загрузка Excel (POST /admin/pricelists) и история загрузок
  * (GET /admin/pricelists). Статусы обработки:
  * pending → mapping_processing → mapping_predicted → processing → completed | failed.
+ * Во время векторизации (processing) страница подписывается на SSE-поток
+ * GET /admin/pricelists/{id}/stream и показывает счётчик «N / M записей» (задача 3.2).
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useSseStream } from '~/composables/useSseStream'
 
 definePageMeta({ layout: 'workspace' })
 
@@ -241,6 +248,67 @@ function pollProcessing() {
     loadUploads(true)
   }
 }
+
+// --- SSE-индикация векторизации каталога (задача 3.2) ---
+
+/** Загрузка с выполняющейся сейчас векторизацией: индикатор только для неё. */
+const processingUpload = computed(
+  () => uploads.value.find((upload) => upload.status === 'processing') || null,
+)
+
+/** Прогресс векторизации: upload_id → текст счётчика («5 000 / 75 000 записей»). */
+const progress = ref<Record<string, string>>({})
+
+/** Загрузка, на поток которой подписаны сейчас (пустая строка — не подписаны). */
+let trackedUploadId = ''
+
+const { open: openProgress, stop: stopProgress } = useSseStream({
+  onEvent(data) {
+    if (!trackedUploadId || data.status !== 'processing') {
+      return
+    }
+    // События LLM-маппинга (mapping_*) игнорируются: здесь нужен только счётчик
+    // векторизации. На этапе чтения файла total ещё неизвестен — показываем сообщение.
+    const processed = typeof data.processed === 'number' ? data.processed : null
+    const total = typeof data.total === 'number' ? data.total : null
+    progress.value[trackedUploadId] =
+      processed !== null && total !== null
+        ? `${processed.toLocaleString('ru-RU')} / ${total.toLocaleString('ru-RU')} записей`
+        : String(data.message || 'Подготовка…')
+  },
+  onDone(data) {
+    // Терминальное событие (completed / error): закрываем счётчик,
+    // ставим тост и обновляем историю — завершение не выводится из статусов.
+    const id = trackedUploadId
+    trackedUploadId = ''
+    if (id) {
+      delete progress.value[id]
+    }
+    if (data.status === 'completed') {
+      toast.success('Прайс-лист обработан, каталог обновлён')
+    } else {
+      toast.error(String(data.message || 'Не удалось обработать прайс-лист'))
+    }
+    loadUploads(true)
+  },
+})
+
+// Подписка живёт только пока векторизация активна: при смене статуса
+// (завершение, ошибка, переход на другую страницу) поток закрывается.
+watch(
+  () => processingUpload.value?.id ?? '',
+  (id) => {
+    if (id === trackedUploadId) {
+      return
+    }
+    trackedUploadId = id
+    if (id) {
+      openProgress(`/admin/pricelists/${id}/stream`)
+    } else {
+      stopProgress()
+    }
+  },
+)
 
 async function retryUpload(id: string) {
   retryingId.value = id
