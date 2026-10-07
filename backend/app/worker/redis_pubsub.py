@@ -22,6 +22,11 @@ def event_buffer_key(channel: str) -> str:
     return f"{channel}:events"
 
 
+def seq_counter_key(channel: str) -> str:
+    """Ключ-счётчик номеров событий канала."""
+    return f"{channel}:seq"
+
+
 class RedisPubSub:
     """Обёртка над Redis Pub/Sub: публикация с буфером, подписка, воспроизведение буфера."""
 
@@ -60,6 +65,21 @@ class RedisPubSub:
         pipe.ltrim(key, 0, EVENT_BUFFER_MAX - 1)  # держать только последние
         pipe.expire(key, EVENT_BUFFER_TTL_SECONDS)
         await pipe.execute()
+
+    async def next_seq(self, channel: str) -> int:
+        """Следующий номер события канала (Redis INCR).
+
+        Один канал могут писать несколько тасок (``pricelist_{id}``: сначала
+        LLM-маппинг, затем векторизация). Локальный счётчик таски начинается
+        с единицы и конфликтует с номерами предыдущей таски при переигрывании
+        SSE-буфера. Общий INCR-счётчик сохраняет монотонность между тасками;
+        TTL сбрасывается на время жизни буфера — после его истечения счётчик
+        не нужен.
+        """
+        client = await self._ensure_client()
+        seq = await client.incr(seq_counter_key(channel))
+        await client.expire(seq_counter_key(channel), EVENT_BUFFER_TTL_SECONDS)
+        return int(seq)
 
     async def buffered_events(self, channel: str) -> list[str]:
         """События из буфера канала в хронологическом порядке (старые — первыми)."""

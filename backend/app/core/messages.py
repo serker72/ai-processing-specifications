@@ -46,10 +46,18 @@ class PriceListMessages:
     MAPPING_PROCESSING = "LLM определяет роли колонок"
     MAPPING_READY = "Маппинг колонок предсказан, ожидает подтверждения"
     MAPPING_FAILED = "Не удалось предсказать маппинг колонок"
+    VECTORIZING_PREPARING = "Чтение прайс-листа"
+    VECTORIZING_STARTED = "Векторизация каталога начата"
+    VECTORIZED_DONE = "Каталог обновлён"
+    VECTORIZING_FAILED = "Ошибка векторизации каталога"
 
     @staticmethod
     def column_not_in_file(column: str) -> str:
         return f"Колонка «{column}» не найдена в файле прайс-листа"
+
+    @staticmethod
+    def vectorized_progress(processed: int, total: int) -> str:
+        return f"Обработано {processed} из {total} записей"
 
 
 class CatalogMessages:

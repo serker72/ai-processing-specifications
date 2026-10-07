@@ -78,13 +78,10 @@ def predict_pricelist_mapping(self: Any, upload_id: str) -> dict:
         redis_pubsub = RedisPubSub()
         channel = f"pricelist_{upload_id}"
 
-        # Номер события: единая нумерация для буфера Redis и live-ленты (дедупликация SSE)
-        seq_counter = 0
-
-        def next_seq() -> int:
-            nonlocal seq_counter
-            seq_counter += 1
-            return seq_counter
+        # Номер события: общий счётчик канала (Redis INCR) — в тот же канал позже
+        # пишет векторизация, нумерация не должна конфликтовать при переигрывании буфера
+        async def next_seq() -> int:
+            return await redis_pubsub.next_seq(channel)
 
         async def publish(status: str, message: str) -> None:
             """Опубликовать событие статуса прайс-листа (с кладкой в буфер для поздних подписчиков)."""
@@ -92,7 +89,7 @@ def predict_pricelist_mapping(self: Any, upload_id: str) -> dict:
                 channel,
                 PriceListStatusEvent(
                     upload_id=upload_id,
-                    seq=next_seq(),
+                    seq=await next_seq(),
                     status=status,
                     message=message,
                 ).model_dump_json(),
@@ -144,72 +141,128 @@ def vectorize_catalog(self: Any, upload_id: str) -> dict:
                 await session.commit()
 
     async def _run() -> dict:
+        from app.core.messages import PriceListMessages
         from app.db.session import async_session_factory
         from app.di.container import create_container
         from app.models.models import UploadStatus
         from app.repositories.catalog_repository import CatalogRepository
         from app.repositories.price_list_repository import PriceListRepository
+        from app.schemas.sse_events import PriceListProgressEvent
         from app.services.embedding_service import EmbeddingService
         from app.services.price_list_service import PriceListService
+        from app.worker.redis_pubsub import RedisPubSub
 
         logger.info("Векторизация каталога: старт")
         container = create_container()
-        async with container() as c:
-            embedding_svc = await c.get(EmbeddingService)
-            price_list_svc = await c.get(PriceListService)
+        redis_pubsub = RedisPubSub()
+        channel = f"pricelist_{upload_id}"
 
-            async with async_session_factory() as session:
-                price_list_repo = PriceListRepository(session)
-                catalog_repo = CatalogRepository(session)
+        async def publish_progress(
+            processed: int | None,
+            total: int | None,
+            status: str,
+            message: str,
+        ) -> None:
+            """Опубликовать прогресс векторизации в канал прайс-листа (с кладкой в буфер).
 
-                upload = await price_list_repo.get_by_id(UUID(upload_id))
-                if upload is None:
-                    logger.warning("Векторизация каталога: загрузка не найдена")
-                    return {"error": "upload not found", "upload_id": upload_id}
-                if not upload.column_mapping:
-                    logger.warning("Векторизация каталога: маппинг колонок не подтверждён")
-                    return {"error": "no column_mapping", "upload_id": upload_id}
+            processed/total=None — этап подготовки: общее число записей неизвестно
+            до чтения файла. Терминальные события — completed / error, по ним клиент
+            закрывает поток и обновляет данные; публикуется последним.
+            """
+            await redis_pubsub.publish(
+                channel,
+                PriceListProgressEvent(
+                    upload_id=upload_id,
+                    seq=await redis_pubsub.next_seq(channel),
+                    processed=processed,
+                    total=total,
+                    status=status,
+                    message=message,
+                ).model_dump_json(),
+                buffered=True,
+            )
 
-                file_key = upload.file_key
-                column_mapping = upload.column_mapping
-                await price_list_repo.update_status(upload.id, UploadStatus.processing)
-                await session.commit()
+        try:
+            async with container() as c:
+                embedding_svc = await c.get(EmbeddingService)
+                price_list_svc = await c.get(PriceListService)
 
-                total = 0
-                try:
-                    rows = await price_list_svc.parse_pricelist(file_key, column_mapping)
-                    total = len(rows)
-                    logger.info("Векторизация каталога: прочитано строк — %d", total)
+                async with async_session_factory() as session:
+                    price_list_repo = PriceListRepository(session)
+                    catalog_repo = CatalogRepository(session)
 
-                    for i in range(0, total, BATCH_SIZE):
-                        batch = rows[i : i + BATCH_SIZE]
-                        embeddings = embedding_svc.embed_passages([r["description"] for r in batch])
-                        items = [
-                            {
-                                "sku": r["sku"],
-                                "name": r["name"],
-                                "unit": r.get("unit"),
-                                "price": r.get("price"),
-                                "embedding": list(emb),
-                            }
-                            for r, emb in zip(batch, embeddings, strict=True)
-                        ]
-                        # UPSERT: повторная загрузка прайса обновляет позиции,
-                        # а не падает на уникальном индексе (sku, name)
-                        await catalog_repo.upsert_batch(items)
-                        await session.commit()
-                        logger.info("Векторизация каталога: обработано %d/%d строк", min(i + BATCH_SIZE, total), total)
+                    upload = await price_list_repo.get_by_id(UUID(upload_id))
+                    if upload is None:
+                        logger.warning("Векторизация каталога: загрузка не найдена")
+                        await publish_progress(
+                            None, None, "error", PriceListMessages.UPLOAD_NOT_FOUND
+                        )
+                        return {"error": "upload not found", "upload_id": upload_id}
+                    if not upload.column_mapping:
+                        logger.warning("Векторизация каталога: маппинг колонок не подтверждён")
+                        await publish_progress(None, None, "error", PriceListMessages.NO_MAPPING)
+                        return {"error": "no column_mapping", "upload_id": upload_id}
 
-                    await price_list_repo.update_status(upload.id, UploadStatus.completed)
+                    file_key = upload.file_key
+                    column_mapping = upload.column_mapping
+                    await price_list_repo.update_status(upload.id, UploadStatus.processing)
                     await session.commit()
-                    logger.info("Векторизация каталога: завершена, %d строк", total)
-                except Exception:
-                    await session.rollback()
-                    await _mark_failed()
-                    logger.exception("Векторизация каталога: ошибка, статус failed")
-                    raise
+                    # Подготовка: total неизвестен до прочтения файла — событие без чисел
+                    await publish_progress(
+                        None, None, "processing", PriceListMessages.VECTORIZING_PREPARING
+                    )
 
-                return {"upload_id": upload_id, "total_rows": total, "status": "completed"}
+                    total = 0
+                    try:
+                        rows = await price_list_svc.parse_pricelist(file_key, column_mapping)
+                        total = len(rows)
+                        logger.info("Векторизация каталога: прочитано строк — %d", total)
+                        await publish_progress(0, total, "processing", PriceListMessages.VECTORIZING_STARTED)
+
+                        for i in range(0, total, BATCH_SIZE):
+                            batch = rows[i : i + BATCH_SIZE]
+                            embeddings = embedding_svc.embed_passages([r["description"] for r in batch])
+                            items = [
+                                {
+                                    "sku": r["sku"],
+                                    "name": r["name"],
+                                    "unit": r.get("unit"),
+                                    "price": r.get("price"),
+                                    "embedding": list(emb),
+                                }
+                                for r, emb in zip(batch, embeddings, strict=True)
+                            ]
+                            # UPSERT: повторная загрузка прайса обновляет позиции,
+                            # а не падает на уникальном индексе (sku, name)
+                            await catalog_repo.upsert_batch(items)
+                            await session.commit()
+                            processed = min(i + BATCH_SIZE, total)
+                            # Прогресс после каждого батча: счётчик «N / M записей»
+                            # виден в UI до окончания обработки всего файла
+                            await publish_progress(
+                                processed,
+                                total,
+                                "processing",
+                                PriceListMessages.vectorized_progress(processed, total),
+                            )
+                            logger.info("Векторизация каталога: обработано %d/%d строк", processed, total)
+
+                        await price_list_repo.update_status(upload.id, UploadStatus.completed)
+                        await session.commit()
+                        # Терминальное событие — последним: клиент по нему закрывает
+                        # поток и обновляет данные, не выводя завершение из статусов
+                        await publish_progress(total, total, "completed", PriceListMessages.VECTORIZED_DONE)
+                        logger.info("Векторизация каталога: завершена, %d строк", total)
+                    except Exception:
+                        await session.rollback()
+                        await _mark_failed()
+                        await publish_progress(None, None, "error", PriceListMessages.VECTORIZING_FAILED)
+                        logger.exception("Векторизация каталога: ошибка, статус failed")
+                        raise
+
+                    return {"upload_id": upload_id, "total_rows": total, "status": "completed"}
+        finally:
+            await redis_pubsub.close()
 
     token = upload_id_var.set(upload_id)
     try:

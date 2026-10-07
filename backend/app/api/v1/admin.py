@@ -246,7 +246,7 @@ async def preview_pricelist(
 
 @admin_router.get(
     "/pricelists/{upload_id}/stream",
-    summary="SSE-поток статусов обработки прайс-листа",
+    summary="SSE-поток статусов и прогресса обработки прайс-листа",
 )
 async def stream_pricelist_status(
     upload_id: str,
@@ -256,11 +256,15 @@ async def stream_pricelist_status(
     session_repository: FromDishka[SessionRepository],
     user_repository: FromDishka[UserRepository],
 ) -> StreamingResponse:
-    """SSE-эндпоинт: real-time статусы LLM-маппинга колонок прайс-листа.
+    """SSE-эндпоинт: real-time статусы LLM-маппинга и прогресс векторизации каталога.
 
     Клиент подписывается на Redis Pub/Sub канал `pricelist_{upload_id}` и получает
-    события статусов (mapping_processing / mapping_predicted / error).
-    Терминальные события (mapping_predicted / error) закрывают поток на стороне клиента.
+    события двух типов: статусы маппинга (mapping_processing / mapping_predicted /
+    error) и прогресс векторизации с счётчиком записей (PriceListProgressEvent:
+    processing / completed / error).
+    Буфер канала воспроизводится при (пере)подключении, дедупликация — по seq.
+    Терминальные события (mapping_predicted / completed / error) закрывают поток
+    на стороне клиента.
     """
     await get_current_admin(request, settings, security_service, session_repository, user_repository)
 

@@ -43,3 +43,21 @@ class PriceListStatusEvent(BaseModel):
         description="mapping_processing / mapping_predicted / processing / completed / error",
     )
     message: str = Field(..., description="Сообщение о статусе")
+
+
+class PriceListProgressEvent(BaseModel):
+    """Событие прогресса векторизации каталога из прайс-листа (задача 3.2).
+
+    Отличается от `PriceListStatusEvent` наличием счётчика записей: клиент
+    показывает «processed / total» (абсолютные числа, не проценты). На этапе
+    чтения файла total ещё неизвестен — тогда processed/total равны None.
+    Терминальные значения статуса — completed / error, по ним клиент закрывает
+    поток и обновляет данные; публикуется последним событием.
+    """
+
+    upload_id: str
+    seq: int | None = Field(None, description="Порядковый номер события (дедупликация буфера и live-ленты)")
+    processed: int | None = Field(None, description="Обработано записей (None — total ещё неизвестен)")
+    total: int | None = Field(None, description="Всего записей в прайс-листе")
+    status: str = Field(..., description="processing / completed / error")
+    message: str = Field(..., description="Сообщение о статусе")
