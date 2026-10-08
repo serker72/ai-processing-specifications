@@ -16,7 +16,12 @@ from typing import Any
 from uuid import UUID
 
 from app.core.logging_config import upload_id_var
-from app.schemas.sse_events import PriceListStatusEvent, ProgressEvent, RowMatchEvent
+from app.schemas.sse_events import (
+    PriceListStatusEvent,
+    ProgressEvent,
+    RowMatchEvent,
+    SpecificationStatusEvent,
+)
 from app.worker import celery_app
 
 logger = logging.getLogger(__name__)
@@ -306,6 +311,65 @@ def reembed_catalog_item(self: Any, item_id: str, name: str) -> dict:
     return _run_async(_run)
 
 
+@_celery_app.task(bind=True, name="specification.predict_mapping")
+def predict_specification_mapping(self: Any, upload_id: str) -> dict:
+    """Предсказание маппинга колонок спецификации через LLM (Задача 5.1).
+
+    Вынесено из HTTP-запроса загрузки: POST /manager/specifications сразу
+    возвращает 202, анализ выполняет эта таска. Переходы статусов
+    pending → mapping_processing → mapping_predicted | failed — в сервисе;
+    здесь — публикация событий в SSE-канал spec_{upload_id} (тот же канал,
+    что у матчинга) и запуск process_specification после успеха.
+    """
+
+    async def _run() -> dict:
+        from app.core.messages import SpecificationMessages
+        from app.di.container import create_container
+        from app.services.specification_service import SpecificationService
+        from app.worker.redis_pubsub import RedisPubSub
+
+        logger.info("Предсказание маппинга спецификации: старт")
+        container = create_container()
+        redis_pubsub = RedisPubSub()
+        channel = f"spec_{upload_id}"
+
+        async def publish(status: str, message: str) -> None:
+            """Опубликовать событие статуса маппинга (с кладкой в буфер для поздних подписчиков)."""
+            await redis_pubsub.publish(
+                channel,
+                SpecificationStatusEvent(
+                    upload_id=upload_id,
+                    # Общий счётчик канала (Redis INCR): в тот же канал пишет
+                    # таска матчинга, нумерация не должна конфликтовать
+                    seq=await redis_pubsub.next_seq(channel),
+                    status=status,
+                    message=message,
+                ).model_dump_json(),
+                buffered=True,
+            )
+
+        try:
+            async with container() as c:
+                spec_svc = await c.get(SpecificationService)
+                await publish("mapping_processing", SpecificationMessages.MAPPING_PROCESSING)
+                result = await spec_svc.predict_mapping(upload_id)
+                await publish("mapping_predicted", SpecificationMessages.MAPPING_READY)
+                logger.info("Предсказание маппинга спецификации: завершено, матчинг запущен")
+                return result
+        except Exception:
+            await publish("error", SpecificationMessages.MAPPING_FAILED)
+            logger.exception("Предсказание маппинга спецификации: ошибка, статус failed")
+            raise
+        finally:
+            await redis_pubsub.close()
+
+    token = upload_id_var.set(upload_id)
+    try:
+        return _run_async(_run)
+    finally:
+        upload_id_var.reset(token)
+
+
 @_celery_app.task(bind=True, name="specification.process")
 def process_specification(
     self: Any,
@@ -337,15 +401,11 @@ def process_specification(
 
         logger.info("Обработка спецификации: старт (manager_id=%s)", manager_id)
 
-        # Номер события: единая нумерация для буфера Redis и live-ленты,
-        # по нему SSE-подписчик отсекает дубликаты при пересечении воспроизведения
-        # буфера и подписки.
-        seq_counter = 0
-
-        def next_seq() -> int:
-            nonlocal seq_counter
-            seq_counter += 1
-            return seq_counter
+        # Номер события: общий счётчик канала (Redis INCR) — в тот же канал пишет
+        # таска предсказания маппинга, нумерация не должна конфликтовать при
+        # переигрывании SSE-буфера; по seq подписчик отсекает дубликаты.
+        async def next_seq() -> int:
+            return await redis_pubsub.next_seq(channel)
 
         async def publish_progress(processed: int, total: int, status: str, message: str) -> None:
             """Опубликовать событие прогресса в канал загрузки (с кладкой в буфер)."""
@@ -353,7 +413,7 @@ def process_specification(
                 channel,
                 ProgressEvent(
                     upload_id=upload_id,
-                    seq=next_seq(),
+                    seq=await next_seq(),
                     processed=processed,
                     total=total,
                     status=status,
@@ -467,7 +527,7 @@ def process_specification(
                                 channel,
                                 RowMatchEvent(
                                     upload_id=upload_id,
-                                    seq=next_seq(),
+                                    seq=await next_seq(),
                                     row_number=row_num,
                                     raw_name=raw_name,
                                     matched_item_id=matched_id,

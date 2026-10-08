@@ -1,6 +1,10 @@
 """Сервис обработки спецификаций: загрузка, превью, предсказание маппинга колонок.
 
 Файл передаётся как поток (SpooledTemporaryFile), не читается в память целиком.
+
+Задача 5.1: LLM-маппинг вынесен из HTTP-запроса в Celery-таску — быстрая часть
+(`create_upload`) сохраняет файл и создаёт запись, медленная (`predict_mapping`)
+выполняется в фоне по образцу `PriceListService`.
 """
 
 import uuid
@@ -9,6 +13,7 @@ from typing import Any
 from app.core.messages import ClientMessages, CommonMessages, SpecificationMessages
 from app.models.models import RowStatus, UploadStatus
 from app.repositories.client_repository import ClientRepository
+from app.repositories.price_list_repository import PriceListRepository
 from app.repositories.specification_repository import SpecificationRepository
 from app.schemas.specification import (
     MatchedCatalogItem,
@@ -44,25 +49,37 @@ class SpecificationService:
         llm: LlmService,
         specification_repo: SpecificationRepository,
         client_repo: ClientRepository,
+        price_list_repo: PriceListRepository,
     ) -> None:
         self._minio = minio
         self._excel_preview = excel_preview
         self._llm = llm
         self._spec_repo = specification_repo
         self._client_repo = client_repo
+        self._price_list_repo = price_list_repo
 
-    async def upload_and_predict(
+    async def is_catalog_updating(self) -> bool:
+        """Идёт ли сейчас векторизация каталога (загрузка прайса в статусе processing).
+
+        Защита от гонки (Задача 5.1): параллельные `catalog.vectorize` и
+        `specification.process` дают недетерминированный матчинг — матчинг видит
+        «частично обновлённый» каталог. Загрузка спецификации отклоняется (409),
+        пока прайс-лист в обработке.
+        """
+        counts = await self._price_list_repo.count_by_status()
+        return counts.get(UploadStatus.processing.value, 0) > 0
+
+    async def create_upload(
         self,
         fileobj: Any,
         original_filename: str,
         manager_id: object,
         client_id: uuid.UUID,
     ) -> dict:
-        """Загрузить спецификацию в MinIO, прочитать превью, предсказать маппинг.
+        """Быстрая часть (задача 5.1): загрузить файл в MinIO, создать запись `pending`.
 
-        Файл передаётся как поток (UploadFile.file):
-        - в MinIO уходит потоково (multipart),
-        - превью читается лениво (openpyxl read_only).
+        LLM-предсказание маппинга здесь не выполняется — его делает Celery-таска
+        `specification.predict_mapping`. Возвращает upload_id для SSE-подписки.
         """
         # 0. Проверить размер
         fileobj.seek(0, 2)
@@ -82,30 +99,63 @@ class SpecificationService:
             file_key, fileobj, content_type=self.XLSX_CONTENT_TYPE
         )
 
-        # 2. Прочитать превью
-        preview = self._excel_preview.read_preview(fileobj, max_rows=50)
-
-        # 3. Предсказать маппинг через LLM
-        predicted_mapping = await self._predict_column_mapping(preview["headers"])
-
-        # 4. Сохранить запись в БД: маппинг + статус предсказанного маппинга
+        # 2. Создать запись в БД со статусом «ожидает предсказания маппинга»
         upload = await self._spec_repo.create(
             manager_id=manager_id,
             client_id=client_id,
             file_key=file_key,
         )
-        await self._spec_repo.update_mapping(
-            upload.id, predicted_mapping.model_dump()
-        )
-        await self._spec_repo.update_status(upload.id, UploadStatus.mapping_predicted)
 
         return {
             "upload_id": str(upload.id),
             "file_key": file_key,
             "file_url": file_url,
-            "preview": preview,
-            "predicted_mapping": predicted_mapping.model_dump(),
+            "status": upload.status.value,
         }
+
+    async def predict_mapping(self, upload_id: str) -> dict:
+        """Медленная часть (задача 5.1): превью + LLM-предсказание маппинга колонок.
+
+        Вызывается из Celery-таски. Переходы статусов:
+        pending → mapping_processing → mapping_predicted | failed.
+        После успешного предсказания здесь же ставится таска матчинга строк.
+        """
+        upload = await self._spec_repo.get_by_id(uuid.UUID(upload_id))
+        if upload is None:
+            raise FileNotFoundError(SpecificationMessages.UPLOAD_NOT_FOUND)
+
+        await self._spec_repo.update_status(upload.id, UploadStatus.mapping_processing)
+        await self._spec_repo.commit()
+
+        try:
+            # 1. Скачать файл и прочитать превью (первые 50 строк, лениво)
+            fileobj = await self._minio.download_fileobj(upload.file_key)
+            preview = self._excel_preview.read_preview(fileobj, max_rows=50)
+
+            # 2. Предсказать маппинг через LLM
+            predicted_mapping = await self._predict_column_mapping(preview["headers"])
+
+            # 3. Сохранить предсказанный маппинг и обновить статус
+            await self._spec_repo.update_mapping(upload.id, predicted_mapping.model_dump())
+            await self._spec_repo.update_status(upload.id, UploadStatus.mapping_predicted)
+            await self._spec_repo.commit()
+
+            # 4. Запустить фоновую обработку строк через Matching Engine.
+            # Маппинг спецификаций не подтверждается вручную (в отличие от
+            # прайс-листов): предсказали — сразу матчим.
+            from app.worker.tasks import process_specification
+
+            process_specification.delay(str(upload.id), str(upload.manager_id))
+
+            return {
+                "upload_id": str(upload.id),
+                "status": UploadStatus.mapping_predicted.value,
+                "mapping": predicted_mapping.model_dump(),
+            }
+        except Exception:
+            await self._spec_repo.update_status(upload.id, UploadStatus.failed)
+            await self._spec_repo.commit()
+            raise
 
     async def list_uploads(self, manager_id: uuid.UUID) -> list[SpecificationUploadItem]:
         """Список ранее загруженных спецификаций менеджера (свежие — первыми)."""

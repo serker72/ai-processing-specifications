@@ -28,6 +28,26 @@ class ProgressEvent(BaseModel):
     message: str = Field(..., description="Сообщение о статусе")
 
 
+class SpecificationStatusEvent(BaseModel):
+    """Событие статуса LLM-маппинга колонок спецификации (Задача 5.1).
+
+    Маппинг — один LLM-запрос, числового прогресса нет, поэтому событие несёт
+    только статус. Публикуется в тот же канал `spec_{upload_id}`, что и
+    `ProgressEvent` таски матчинга: клиент получает полный цикл
+    mapping_processing → mapping_predicted → processing… → completed одним
+    потоком. Терминальные значения — completed / error, по ним клиент
+    закрывает поток и обновляет данные.
+    """
+
+    upload_id: str
+    seq: int | None = Field(None, description="Порядковый номер события (дедупликация буфера и live-ленты)")
+    status: str = Field(
+        ...,
+        description="mapping_processing / mapping_predicted / error",
+    )
+    message: str = Field(..., description="Сообщение о статусе")
+
+
 class PriceListStatusEvent(BaseModel):
     """Событие статуса обработки прайс-листа (маппинг колонок, векторизация).
 

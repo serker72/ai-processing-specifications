@@ -76,6 +76,11 @@ class SpecificationMessages:
     CATALOG_ITEM_NOT_FOUND = "Позиция каталога не найдена"
     RETRY_NOT_FAILED = "Повторить обработку можно только для спецификации со статусом «Ошибка»"
     NO_MAPPING = "Маппинг колонок спецификации не подтверждён"
+    MAPPING_PROCESSING = "LLM определяет роли колонок"
+    MAPPING_READY = "Маппинг колонок предсказан"
+    MAPPING_FAILED = "Не удалось предсказать маппинг колонок"
+    UPLOAD_NOT_FOUND = "Загрузка спецификации не найдена"
+    CATALOG_UPDATING = "Идёт обновление каталога, попробуйте позже"
 
 
 class ClientMessages:

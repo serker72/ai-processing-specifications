@@ -18,7 +18,7 @@ from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_current_manager
 from app.core.config import Settings
-from app.core.messages import CommonMessages
+from app.core.messages import CommonMessages, SpecificationMessages
 from app.models.models import User
 from app.repositories.session_repository import SessionRepository
 from app.repositories.user_repository import UserRepository
@@ -48,7 +48,7 @@ from app.services.proposal_service import (
 )
 from app.services.security import SecurityService
 from app.services.specification_service import FileTooLargeError, SpecificationService
-from app.worker.tasks import process_specification
+from app.worker.tasks import predict_specification_mapping, process_specification
 
 manager_router = APIRouter(route_class=DishkaRoute, prefix="/manager", tags=["manager"])
 
@@ -370,8 +370,8 @@ async def stream_specification_progress(
 
 @manager_router.post(
     "/specifications",
-    status_code=status.HTTP_201_CREATED,
-    summary="Загрузить спецификацию клиента: сохранить в MinIO, превью, LLM-маппинг колонок",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Загрузить спецификацию клиента: сохранить в MinIO, вернуть upload_id для отслеживания",
 )
 async def upload_specification(
     file: Annotated[UploadFile, File(...)],
@@ -383,7 +383,13 @@ async def upload_specification(
     user_repository: FromDishka[UserRepository],
     specification_service: FromDishka[SpecificationService],
 ) -> dict:
-    """Загрузить Excel-спецификацию: потоковая загрузка в MinIO, превью 50 строк, LLM-маппинг колонок."""
+    """Загрузить Excel-спецификацию: потоковая загрузка в MinIO, статус 202 + enqueue LLM-маппинга.
+
+    LLM-предсказание маппинга и матчинг строк выполняются в фоне (Задача 5.1):
+    таска `specification.predict_mapping` → `specification.process`. Отклоняется
+    с 409, пока идёт векторизация каталога — иначе матчинг увидит частично
+    обновлённый каталог (гонка Задачи 3.2 ↔ 5.2).
+    """
     manager: User = await get_current_manager(
         request, settings, security_service, session_repository, user_repository
     )
@@ -398,20 +404,29 @@ async def upload_specification(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=CommonMessages.VALIDATION_ERROR
         ) from None
 
+    # Гонка «векторизация каталога ↔ матчинг спецификации» (Задача 5.1):
+    # параллельная обработка прайса дала бы недетерминированный результат
+    # матчинга — отклоняем загрузку, пока каталог обновляется.
+    if await specification_service.is_catalog_updating():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=SpecificationMessages.CATALOG_UPDATING,
+        )
+
     try:
-        result = await specification_service.upload_and_predict(
+        result = await specification_service.create_upload(
             fileobj=file.file,
             original_filename=file.filename,
             manager_id=manager.id,
             client_id=client_uuid,
         )
 
-        # Запустить фоновую обработку строк через Matching Engine.
-        # Commit до .delay(): иначе воркер выберет задачу раньше, чем upload
-        # станет виден в базе, и обработает несуществующую загрузку.
+        # Запустить фоновое предсказание маппинга; матчинг строк ставит таска
+        # после успеха. Commit до .delay(): иначе воркер выберет задачу раньше,
+        # чем upload станет виден в базе.
         upload_id = result["upload_id"]
         await specification_service.commit_upload()
-        process_specification.delay(upload_id, str(manager.id))
+        predict_specification_mapping.delay(upload_id)
 
     except FileTooLargeError as e:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(e)) from e

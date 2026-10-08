@@ -257,6 +257,7 @@ class ServiceProvider(Provider):
         llm_service: LlmService,
         specification_repo: SpecificationRepository,
         client_repo: ClientRepository,
+        price_list_repo: PriceListRepository,
     ) -> SpecificationService:
         return SpecificationService(
             minio_service,
@@ -264,6 +265,7 @@ class ServiceProvider(Provider):
             llm_service,
             specification_repo,
             client_repo,
+            price_list_repo,
         )
 
     @provide
