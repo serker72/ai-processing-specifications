@@ -86,6 +86,7 @@ interface SpecificationUploadItem {
 /** Подписи статусов обработки (UploadStatus в app/models/models.py). */
 const STATUS_LABELS: Record<string, string> = {
   pending: 'Ожидает обработки',
+  mapping_processing: 'Анализирует LLM',
   mapping_predicted: 'Маппинг предсказан',
   processing: 'Обработка',
   completed: 'Завершено',
@@ -133,9 +134,10 @@ async function loadUploads(silent = false) {
   }
 }
 
-/** Фоновое обновление, пока есть спецификации в обработке. */
+/** Фоновое обновление, пока есть спецификации в обработке (в т.ч. LLM-маппинг). */
 function pollProcessing() {
-  if (uploads.value.some((upload) => upload.status === 'processing')) {
+  const inFlight = ['processing', 'mapping_processing', 'pending']
+  if (uploads.value.some((upload) => inFlight.includes(upload.status))) {
     loadUploads(true)
   }
 }
