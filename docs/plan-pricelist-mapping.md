@@ -580,3 +580,7 @@ TestClient подтвердил проброс заголовка в лог и �
    дедупликация по `seq`, отдельное событие завершения (`completed`/`error`); frontend сам
    решает, что отображать. WebSocket не нужен — поток только сервер→клиент, а SSE
    переиспользует существующий код и не требует upgrade в nginx.
+   ⏳ **Не закрыто.** Подтверждено 2026-10-08 (smoke обработки прайса): поллинг 5 с
+   остаётся на `admin/pricelists/index.vue`, `manager/uploads.vue` и
+   `manager/specifications/[uploadId].vue`. Перенесено в `docs/design-plan.md`,
+   раздел «Обнаруженные проблемы», пункт 4.
