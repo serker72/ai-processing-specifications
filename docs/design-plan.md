@@ -153,36 +153,33 @@
   * ✅ DI-провайдеры для `SpecificationRepository` и `SpecificationService`.
   * ✅ Smoke-тест: загрузка Excel → MinIO + превью + LLM-маппинг → 201 Created.
 
-* ⚠️ **Требуется доработка (архитектура): LLM-маппинг вынести из HTTP-запроса в фоновую задачу.**
-  Как и в Задаче 3.1, `POST /api/v1/manager/specifications` синхронно вызывает LLM —
-  запрос блокируется на всё время анализа. Правильно:
-  * загрузить файл в MinIO и сразу создать запись `SpecificationUpload` со статусом `created`
-    (или переиспользовать `pending`), вернуть `202 Accepted` с `upload_id` без ожидания LLM;
-  * предсказание маппинга выполнять в Celery-таске (по аналогии с `specification.process`,
-    Задача 5.2);
-  * промежуточный статус `mapping_processing` (в `UploadStatus`) на время анализа, далее
-    `mapping_predicted` / `failed`;
-  * фронтенд подписывается на SSE-поток и показывает превью с маппингом после готовности.
-  Затрагивает: `UploadStatus`, `SpecificationService`, `api/v1/manager.py`, `worker/tasks.py`,
-  `manager/specifications/index.vue`.
+* **✅ Реализовано: LLM-маппинг вынесен из HTTP-запроса в фоновую задачу (по образцу Задачи 3.1).**
+  * `POST /api/v1/manager/specifications` выполняет только быструю часть
+    (`SpecificationService.create_upload`: проверка размера/клиента + файл в MinIO +
+    запись `pending`) и сразу возвращает `202 Accepted` с `upload_id`;
+  * Celery-таска `specification.predict_mapping` (`app/worker/tasks.py`) — превью
+    50 строк из MinIO + LLM-предсказание маппинга (`SpecificationService.predict_mapping`);
+  * статусы: `pending → mapping_processing → mapping_predicted | failed`
+    (`UploadStatus.mapping_processing`);
+  * после успеха таска матчинга ставится из сервиса (`process_specification.delay`) —
+    маппинг спецификаций не подтверждается вручную, в отличие от прайс-листов;
+  * события `SpecificationStatusEvent` (`app/schemas/sse_events.py`) публикуются в тот же
+    канал `spec_{upload_id}`, что и прогресс матчинга; `seq` — общий счётчик канала
+    (Redis INCR, `RedisPubSub.next_seq`), клиент получает полный цикл одним потоком;
+  * frontend: подпись статуса `mapping_processing` и поллинг списка, пока статусы
+    `pending / mapping_processing / processing` (`manager/uploads.vue`).
 
-* ⚠️ **Требуется доработка (архитектура): защита от гонки «векторизация каталога ↔ матчинг спецификации».**
-  `catalog.vectorize` (Задача 3.2) коммитит каталог батчами по 500 строк, а
-  `specification.process` (Задача 5.2) может выполняться параллельно в другом процессе
-  воркера (у worker нет ограничения concurrency). Тогда матчинг видит «частично обновлённый»
-  каталог: одна и та же строка может стать `top_n` или `unmatched` в зависимости от того,
-  успел ли закоммититься нужный батч, — результат недетерминирован. Ошибок и дедлоков нет
-  (UPSERT идемпотентен, таблицы разные), страдает только согласованность результата.
+* **✅ Реализовано: защита от гонки «векторизация каталога ↔ матчинг спецификации».**
   Выбранное решение (простейшее): **при `POST /api/v1/manager/specifications` проверять,
   нет ли загрузок прайс-листов в статусе `processing`, и при наличии возвращать `409`
   с сообщением «идёт обновление каталога, попробуйте позже».**
-  * Проверка — по `PriceListRepository.count_by_status()` / фильтру `processing`.
-  * Текст ошибки — в `SpecificationMessages` (не хардкодить).
-  * Frontend `manager/specifications/index.vue` — показать тост с текстом 409.
-  * Не покрывает узкое окно (векторизация стартовала после начала матчинга); для строгой
+  * `SpecificationService.is_catalog_updating()` — по
+    `PriceListRepository.count_by_status()` / фильтру `processing`;
+  * текст ошибки — `SpecificationMessages.CATALOG_UPDATING` (не хардкод);
+  * frontend — `toast.fromError` показывает `detail` ответа 409 на
+    `manager/specifications/index.vue`;
+  * не покрывает узкое окно (векторизация стартовала после начала матчинга); для строгой
     корректности потребовалась бы двусторонняя блокировка с TTL — не делаем.
-  * Затрагивает: `api/v1/manager.py`, `SpecificationService`, `SpecificationMessages`,
-    `manager/specifications/index.vue`.
 
 ---
 
