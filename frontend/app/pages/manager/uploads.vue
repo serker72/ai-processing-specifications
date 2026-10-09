@@ -69,11 +69,12 @@
 <script setup lang="ts">
 /**
  * Список спецификаций, загруженных текущим менеджером (GET /manager/specifications).
- * Строки реестра загрузок приходят с backend, сортировка — по времени загрузки
- * (новые первыми); статус — стадия обработки файла Matching Engine.
+ * Статусы обновляются через SSE-потоки per-upload (problem 4: вместо polling).
  */
 
 definePageMeta({ layout: 'workspace' })
+
+import { useSseStreams } from '~/composables/useSseStreams'
 
 /** Ответ backend: app/schemas/specification.py (SpecificationUploadItem). */
 interface SpecificationUploadItem {
@@ -99,8 +100,38 @@ const retryingId = ref('')
 /** Скелетон вместо пустого состояния — только на первой загрузке страницы. */
 const showSkeleton = computed(() => isLoading.value && uploads.value.length === 0)
 
-const POLL_INTERVAL_MS = 5000
-let pollTimer: ReturnType<typeof setInterval> | null = null
+/** Статусы, по которым держим SSE-подписку на загрузку. */
+const ACTIVE_STATUSES = ['pending', 'mapping_processing', 'mapping_predicted', 'processing']
+
+/** Значения status, которые относятся к статусу загрузки: события строк
+ * (matched/unmatched) игнорируем — они не меняют статус в списке. */
+const STATUS_VALUES = ['pending', 'mapping_processing', 'mapping_predicted', 'processing', 'completed', 'error']
+
+const { track, untrack, trackedIds } = useSseStreams({
+  onEvent(id, data) {
+    const status = String(data.status ?? '')
+    if (!STATUS_VALUES.includes(status)) return
+    const row = uploads.value.find((upload) => upload.id === id)
+    if (row && row.status !== status) loadUploads(true)
+  },
+  onDone() {
+    loadUploads(true)
+  },
+})
+
+function syncTracking() {
+  const active = new Set(
+    uploads.value
+      .filter((upload) => ACTIVE_STATUSES.includes(upload.status))
+      .map((upload) => upload.id),
+  )
+  for (const id of active) track(id, `/manager/specifications/${id}/stream`)
+  for (const id of trackedIds()) {
+    if (!active.has(id)) untrack(id)
+  }
+}
+
+watch(uploads, syncTracking)
 
 // $api — API-клиент из plugins/api.ts: credentials и повтор запроса после 401
 const { $api } = useNuxtApp() as any
@@ -114,7 +145,7 @@ function formatDateTime(value: string) {
   return new Date(value).toLocaleString('ru-RU')
 }
 
-/** silent=true — фоновое обновление (polling) без скелетона и тостов об ошибке. */
+/** silent=true — фоновое обновление из SSE без скелетона и тостов об ошибке. */
 async function loadUploads(silent = false) {
   if (!silent) {
     isLoading.value = true
@@ -134,14 +165,6 @@ async function loadUploads(silent = false) {
   }
 }
 
-/** Фоновое обновление, пока есть спецификации в обработке (в т.ч. LLM-маппинг). */
-function pollProcessing() {
-  const inFlight = ['processing', 'mapping_processing', 'pending']
-  if (uploads.value.some((upload) => inFlight.includes(upload.status))) {
-    loadUploads(true)
-  }
-}
-
 async function retryUpload(id: string) {
   retryingId.value = id
   try {
@@ -157,13 +180,5 @@ async function retryUpload(id: string) {
 
 onMounted(() => {
   loadUploads()
-  pollTimer = setInterval(pollProcessing, POLL_INTERVAL_MS)
-})
-
-onBeforeUnmount(() => {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
 })
 </script>

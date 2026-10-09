@@ -479,28 +479,8 @@ onMounted(async () => {
   openStream(uploadId)
 })
 
-// Фолбэк-обновление, пока идёт обработка: SSE может оборваться, а статус
-// должен появиться. Тихо (без скелетона и тостов) опрашиваем детали.
-const POLL_INTERVAL_MS = 5000
-let pollTimer: ReturnType<typeof setInterval> | null = null
-
-function pollProcessing() {
-  if (uploadDetail.value?.status === 'processing') {
-    loadUploadDetail()
-    loadRows(page.value)
-  }
-}
-
-onMounted(() => {
-  pollTimer = setInterval(pollProcessing, POLL_INTERVAL_MS)
-})
-
 onBeforeUnmount(() => {
   stopStream()
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
 })
 </script>
 

@@ -133,11 +133,11 @@
  * Прайс-листы: загрузка Excel (POST /admin/pricelists) и история загрузок
  * (GET /admin/pricelists). Статусы обработки:
  * pending → mapping_processing → mapping_predicted → processing → completed | failed.
- * Во время векторизации (processing) страница подписывается на SSE-поток
- * GET /admin/pricelists/{id}/stream и показывает счётчик «N / M записей» (задача 3.2).
+ * Во время обработки страница подписывается на SSE-потоки каждой активной
+ * загрузки (useSseStreams) и показывает счётчик «N / M записей» (задача 3.2).
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useSseStream } from '~/composables/useSseStream'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useSseStreams } from '~/composables/useSseStreams'
 
 definePageMeta({ layout: 'workspace' })
 
@@ -151,7 +151,6 @@ interface PriceListUpload {
 }
 
 const PAGE_SIZE = 20
-const POLL_INTERVAL_MS = 5000
 
 const { $api } = useNuxtApp() as any
 const toast = useToast()
@@ -171,7 +170,11 @@ const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)
 /** Скелетон вместо пустого состояния — только на первой загрузке страницы. */
 const showSkeleton = computed(() => isLoading.value && uploads.value.length === 0)
 
-let pollTimer: ReturnType<typeof setInterval> | null = null
+/** Прогресс векторизации: upload_id → текст счётчика («5 000 / 75 000 записей»). */
+const progress = ref<Record<string, string>>({})
+
+/** Статусы, по которым держим SSE-подписку на загрузку. */
+const ACTIVE_STATUSES = ['pending', 'mapping_processing', 'processing']
 
 /** Подписи статусов UploadStatus для чипов фильтра. */
 const STATUS_LABELS: Record<string, string> = {
@@ -197,7 +200,7 @@ function formatDateTime(value: string) {
 }
 
 /**
- * Загрузить страницу истории. silent=true — фоновое обновление (polling):
+ * Загрузить страницу истории. silent=true — фоновое обновление из SSE:
  * не показывает скелетон и не спамит тостами при временной ошибке.
  */
 async function loadUploads(silent = false) {
@@ -238,52 +241,32 @@ function goToPage(target: number) {
   loadUploads()
 }
 
-/** Фоновое обновление, пока есть загрузки в обработке. */
-function pollProcessing() {
-  const hasProcessing =
-    (counts.value.processing ?? 0) > 0 ||
-    (counts.value.mapping_processing ?? 0) > 0 ||
-    uploads.value.some((u) => u.status === 'processing' || u.status === 'mapping_processing')
-  if (hasProcessing) {
-    loadUploads(true)
-  }
-}
+// --- Коллекционная подписка на SSE-потоки (problem 4: вместо polling) ---
 
-// --- SSE-индикация векторизации каталога (задача 3.2) ---
-
-/** Загрузка с выполняющейся сейчас векторизацией: индикатор только для неё. */
-const processingUpload = computed(
-  () => uploads.value.find((upload) => upload.status === 'processing') || null,
-)
-
-/** Прогресс векторизации: upload_id → текст счётчика («5 000 / 75 000 записей»). */
-const progress = ref<Record<string, string>>({})
-
-/** Загрузка, на поток которой подписаны сейчас (пустая строка — не подписаны). */
-let trackedUploadId = ''
-
-const { open: openProgress, stop: stopProgress } = useSseStream({
-  onEvent(data) {
-    if (!trackedUploadId || data.status !== 'processing') {
+const { track, untrack, trackedIds } = useSseStreams({
+  onEvent(id, data) {
+    const status = String(data.status ?? '')
+    if (status === 'processing') {
+      // Событие прогресса векторизации: счётчик «N / M записей». На этапе
+      // чтения файла total ещё неизвестен — показываем сообщение.
+      const processed = typeof data.processed === 'number' ? data.processed : null
+      const total = typeof data.total === 'number' ? data.total : null
+      progress.value[id] =
+        processed !== null && total !== null
+          ? `${processed.toLocaleString('ru-RU')} / ${total.toLocaleString('ru-RU')} записей`
+          : String(data.message || 'Подготовка…')
       return
     }
-    // События LLM-маппинга (mapping_*) игнорируются: здесь нужен только счётчик
-    // векторизации. На этапе чтения файла total ещё неизвестен — показываем сообщение.
-    const processed = typeof data.processed === 'number' ? data.processed : null
-    const total = typeof data.total === 'number' ? data.total : null
-    progress.value[trackedUploadId] =
-      processed !== null && total !== null
-        ? `${processed.toLocaleString('ru-RU')} / ${total.toLocaleString('ru-RU')} записей`
-        : String(data.message || 'Подготовка…')
-  },
-  onDone(data) {
-    // Терминальное событие (completed / error): закрываем счётчик,
-    // ставим тост и обновляем историю — завершение не выводится из статусов.
-    const id = trackedUploadId
-    trackedUploadId = ''
-    if (id) {
-      delete progress.value[id]
+    // Смена статуса (mapping_processing / mapping_predicted): тихо обновляем
+    // список, чтобы статус строки и счётчики чипов остались актуальными.
+    if (status === 'mapping_processing' || status === 'mapping_predicted') {
+      loadUploads(true)
     }
+  },
+  onDone(id, data) {
+    // Терминальное событие (completed / error): закрываем счётчик,
+    // ставим тост и обновляем историю.
+    delete progress.value[id]
     if (data.status === 'completed') {
       toast.success('Прайс-лист обработан, каталог обновлён')
     } else {
@@ -293,22 +276,19 @@ const { open: openProgress, stop: stopProgress } = useSseStream({
   },
 })
 
-// Подписка живёт только пока векторизация активна: при смене статуса
-// (завершение, ошибка, переход на другую страницу) поток закрывается.
-watch(
-  () => processingUpload.value?.id ?? '',
-  (id) => {
-    if (id === trackedUploadId) {
-      return
-    }
-    trackedUploadId = id
-    if (id) {
-      openProgress(`/admin/pricelists/${id}/stream`)
-    } else {
-      stopProgress()
-    }
-  },
-)
+function syncTracking() {
+  const active = new Set(
+    uploads.value
+      .filter((upload) => ACTIVE_STATUSES.includes(upload.status))
+      .map((upload) => upload.id),
+  )
+  for (const id of active) track(id, `/admin/pricelists/${id}/stream`)
+  for (const id of trackedIds()) {
+    if (!active.has(id)) untrack(id)
+  }
+}
+
+watch(uploads, syncTracking)
 
 async function retryUpload(id: string) {
   retryingId.value = id
@@ -355,13 +335,5 @@ async function handleUpload() {
 
 onMounted(() => {
   loadUploads()
-  pollTimer = setInterval(pollProcessing, POLL_INTERVAL_MS)
-})
-
-onBeforeUnmount(() => {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
 })
 </script>

@@ -37,6 +37,92 @@ interface UseSseStreamOptions {
 /** Максимальная задержка переподключения, мс. */
 const MAX_RECONNECT_DELAY_MS = 15000
 
+/** Зависимости для createSseConnection (инжектируются извне, без useNuxtApp). */
+export interface SseConnectionDeps {
+  apiBase: string
+  authRefresh?: () => Promise<unknown>
+}
+
+/** Одна SSE-подписка без Vue-контекста: вызывается из useSseStreams. */
+export function createSseConnection(
+  deps: SseConnectionDeps,
+  { onEvent, onDone }: UseSseStreamOptions,
+) {
+  let eventSource: EventSource | null = null
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let attempt = 0
+  let stopped = true
+  let streamPath = ''
+  let lastSeq = 0
+
+  function cleanup() {
+    if (eventSource) {
+      eventSource.close()
+      eventSource = null
+    }
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+  }
+
+  function openStream() {
+    if (stopped) return
+    eventSource = new EventSource(`${deps.apiBase}${streamPath}`, { withCredentials: true })
+
+    eventSource.onmessage = (event) => {
+      let data: SseStreamEvent
+      try {
+        data = JSON.parse(event.data)
+      } catch {
+        return
+      }
+      if (typeof data.seq === 'number') {
+        if (data.seq <= lastSeq) return
+        lastSeq = data.seq
+      }
+      onEvent(data)
+      const status = String(data.status ?? '')
+      if (status === 'completed' || status === 'error') {
+        stopped = true
+        cleanup()
+        onDone?.(data)
+      }
+    }
+
+    eventSource.onerror = () => {
+      cleanup()
+      if (stopped) return
+      const delay = Math.min(1000 * 2 ** attempt, MAX_RECONNECT_DELAY_MS)
+      attempt += 1
+      reconnectTimer = setTimeout(async () => {
+        try {
+          await deps.authRefresh?.()
+        } catch {
+          /* рефреш не критичен */
+        }
+        openStream()
+      }, delay)
+    }
+  }
+
+  function open(path: string) {
+    stop()
+    stopped = false
+    attempt = 0
+    lastSeq = 0
+    streamPath = path
+    openStream()
+  }
+
+  function stop() {
+    stopped = true
+    cleanup()
+  }
+
+  return { open, stop }
+}
+
 export function useSseStream({ onEvent, onDone }: UseSseStreamOptions) {
   const config = useRuntimeConfig()
   const { $authRefresh } = useNuxtApp() as any
