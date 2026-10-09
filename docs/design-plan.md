@@ -365,26 +365,32 @@
    * **Статус:** требуется исследование `frontend/app/pages/admin/pricelists/[uploadId].vue`
      (обработчик confirm + реакция на статус).
 
-3. **Неоптимальная векторизация каталога: эмбеддинги пересчитываются для всех строк.**
+3. **Неоптимальная векторизация каталога: эмбеддинги пересчитываются для всех строк.** ✅
    * После изменения 200 записей `catalog.vectorize` заново считает эмбеддинги для
      всех ~74 924 строк.
-   * **Предложение:** добавить колонку с хэшем `sku + name` (`content_hash`); при
-     векторизации пропускать строки с неизменившимся хэшем, пересчитывать эмбеддинг
-     только для новых/изменённых позиций.
-   * **Статус:** требуется миграция + изменение `catalog.vectorize`/UPSERT.
+   * **Решение (реализовано):**
+     1. **Колонка `content_hash`** в `CatalogItem` (`String(64)`, nullable) — SHA-256 хэш от `sku + "\n" + name`.
+     2. **Миграция** (`backend/alembic/versions/20261009_100000-e7f8a9b0c1d2_add_content_hash_to_catalog_items.py`):
+        `upgrade()` добавляет колонку и заполняет хэши для **всех существующих записей** батчами по 500 строк через `UPDATE ... FROM (VALUES ...)`.
+     3. **`content_hash_of(sku, name)`** (`backend/app/repositories/catalog_repository.py`): чистая функция, вычисляет SHA-256 от `sku\nname`.
+     4. **`CatalogRepository.find_hashes_by_keys(keys)`**: `SELECT sku, name, content_hash WHERE content_hash IS NOT NULL AND tuple_(sku, name) IN :keys` — возвращает `{(sku, name): content_hash}` для строк с уже вычисленным хэшем.
+     5. **`CatalogRepository.upsert_batch(items)`**: `embedding` пишется через `COALESCE(excluded, stored)` (для unchanged строка приходит с `embedding=None` — старый эмбеддинг сохраняется); `DO UPDATE` выполняется только если `price`, `unit` или `content_hash` реально изменились (`is_distinct_from`) — меньше лишней переиндексации HNSW.
+     6. **`worker/tasks.py` (таска `vectorize_catalog`)**: для каждого батча считает `content_hash_of` по парам, читает существующие хэши (`find_hashes_by_keys`), отправляет в `embed_passages` только `to_embed` (changed), для unchanged ставит `embedding=None`; логирует «пересчитано / пропущено».
+   * **Эффект:** при загрузке прайс-листа с 70 000 строк, где изменились 500, пересчитываются только 500 эмбеддингов вместо 70 000.
+   * **Статус:** ✅ Реализовано.
 
-4. **Поллинг списков вместо подписки на SSE (на `/admin/pricelists` и в кабинете менеджера).**
-   * **Незакрытая задача из `docs/plan-pricelist-mapping.md`** — раздел
+4. **Поллинг списков вместо подписки на SSE (на `/admin/pricelists` и в кабинете менеджера).** ✅
+   * **Задача из `docs/plan-pricelist-mapping.md`** — раздел
      «Требуется доработка: индикация и события обработки прайса (2026-10-03)», **пункт 2
      «Заменить polling на события»**. Пункт 1 той же секции (индикация векторизации)
-     закрыт, пункт 2 — нет.
+     был закрыт ранее, пункт 2 закрыт этой реализацией.
    * В консоли браузера циклически идут `GET /admin/pricelists?page=1&page_size=20`,
      хотя по плану от поллинга должны были отказаться в пользу SSE.
    * **Причина:** поллинг — это механизм из **P2.6** («Авто-обновление статусов»,
      коммит `d20dc29`), а не осознанно оставленный фолбэк под SSE. Задача «Заменить
      polling на события» была зафиксирована в `docs/plan-pricelist-mapping.md`
      (2026-10-03), но выполнена лишь частично: SSE-потоки сделали, а поллинг на
-     страницах-списках не убрали.
+     страницах-списках не убрали (устранено этой реализацией).
    * Страница списка `/admin/pricelists` держит поллинг каждые 5 с
      (`frontend/app/pages/admin/pricelists/index.vue`, строки 154, 242–250, 356–366):
      `setInterval(pollProcessing, 5000)`. Запрос уходит, пока глобальные счётчики
@@ -402,8 +408,11 @@
    * SSE-потоки уже существуют и публикуют те же статусы
      (`pricelist_{upload_id}` и `spec_{upload_id}`, буфер в Redis + дедупликация по `seq`),
      поэтому поллинг избыточен.
-   * **Статус:** требуется замена/удаление поллинга на страницах списков (переход на
-     SSE-события статусов; поллинг оставить максимум как редкий страховочный фолбэк).
+   * **Решение (реализовано):** поллинг на страницах-списках удалён, подписка на SSE через новый композабл `frontend/app/composables/useSseStreams.ts` (мульти-подписка по id+path с `track`/`untrack`/`trackedIds`, переиспользует `createSseConnection` из `useSseStream.ts`):
+     * `frontend/app/pages/admin/pricelists/index.vue` — `setInterval(pollProcessing, 5000)` убран; на каждую активную загрузку (`processing`/`mapping_processing`) открывается `/admin/pricelists/{id}/stream`, прогресс и терминальный статус обновляют список и счётчики.
+     * `frontend/app/pages/manager/uploads.vue` — `setInterval` убран; подписка через `useSseStreams` на `/manager/specifications/{id}/stream`.
+     * `frontend/app/pages/manager/specifications/[uploadId].vue` — удалён поллинг-фолбэк каждые 5 с; страница уже использует `useSpecStream` (SSE с реконнектом, backoff и refresh токена).
+   * **Статус:** ✅ Реализовано.
 
 5. **Неудобная пагинация и отсутствие сортировки в таблицах.**
    * Пагинация только «вперёд/назад»; нет перехода на первую/последнюю/указанную
