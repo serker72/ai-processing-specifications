@@ -85,6 +85,9 @@ class CatalogItem(Base):
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(768), comment="Эмбеддинг наименования (768-dim, multilingual-e5-base)"
     )
+    content_hash: Mapped[str | None] = mapped_column(
+        String(64), comment="SHA-256 хэш содержимого (sku + name) для пропуска неизменных строк"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), comment="Время создания записи"
     )

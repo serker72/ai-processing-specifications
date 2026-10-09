@@ -150,7 +150,7 @@ def vectorize_catalog(self: Any, upload_id: str) -> dict:
         from app.db.session import async_session_factory
         from app.di.container import create_container
         from app.models.models import UploadStatus
-        from app.repositories.catalog_repository import CatalogRepository
+        from app.repositories.catalog_repository import CatalogRepository, content_hash_of
         from app.repositories.price_list_repository import PriceListRepository
         from app.schemas.sse_events import PriceListProgressEvent
         from app.services.embedding_service import EmbeddingService
@@ -224,24 +224,54 @@ def vectorize_catalog(self: Any, upload_id: str) -> dict:
                         logger.info("Векторизация каталога: прочитано строк — %d", total)
                         await publish_progress(0, total, "processing", PriceListMessages.VECTORIZING_STARTED)
 
+                        # Проблема 3: позиции с неизменным content_hash не
+                        # отправляются в эмбеддинг-модель — пересчёт только для
+                        # новых/изменённых строк (повторная векторизация большого
+                        # прайса больше не пересчитывает все эмбеддинги заново)
+                        recomputed_total = 0
+
                         for i in range(0, total, BATCH_SIZE):
                             batch = rows[i : i + BATCH_SIZE]
-                            embeddings = embedding_svc.embed_passages([r["description"] for r in batch])
+                            batch_hashes = {
+                                (r["sku"], r["name"]): content_hash_of(r["sku"], r["name"])
+                                for r in batch
+                            }
+                            existing_hashes = await catalog_repo.find_hashes_by_keys(
+                                list(batch_hashes)
+                            )
+                            to_embed = [
+                                r
+                                for r in batch
+                                if existing_hashes.get((r["sku"], r["name"]))
+                                != batch_hashes[(r["sku"], r["name"])]
+                            ]
+                            embeddings = embedding_svc.embed_passages(
+                                [r["description"] for r in to_embed]
+                            )
+                            embedding_by_key = {
+                                (r["sku"], r["name"]): list(emb)
+                                for r, emb in zip(to_embed, embeddings, strict=True)
+                            }
                             items = [
                                 {
                                     "sku": r["sku"],
                                     "name": r["name"],
                                     "unit": r.get("unit"),
                                     "price": r.get("price"),
-                                    "embedding": list(emb),
+                                    "content_hash": batch_hashes[(r["sku"], r["name"])],
+                                    # None для unchanged: UPSERT сохранит старый
+                                    # эмбеддинг через COALESCE(excluded, stored)
+                                    "embedding": embedding_by_key.get((r["sku"], r["name"])),
                                 }
-                                for r, emb in zip(batch, embeddings, strict=True)
+                                for r in batch
                             ]
                             # UPSERT: повторная загрузка прайса обновляет позиции,
                             # а не падает на уникальном индексе (sku, name)
                             await catalog_repo.upsert_batch(items)
                             await session.commit()
+                            recomputed_total += len(to_embed)
                             processed = min(i + BATCH_SIZE, total)
+                            skipped = len(batch) - len(to_embed)
                             # Прогресс после каждого батча: счётчик «N / M записей»
                             # виден в UI до окончания обработки всего файла
                             await publish_progress(
@@ -250,14 +280,26 @@ def vectorize_catalog(self: Any, upload_id: str) -> dict:
                                 "processing",
                                 PriceListMessages.vectorized_progress(processed, total),
                             )
-                            logger.info("Векторизация каталога: обработано %d/%d строк", processed, total)
+                            logger.info(
+                                "Векторизация каталога: обработано %d/%d строк "
+                                "(пересчитано эмбеддингов %d, пропущено %d)",
+                                processed,
+                                total,
+                                len(to_embed),
+                                skipped,
+                            )
 
                         await price_list_repo.update_status(upload.id, UploadStatus.completed)
                         await session.commit()
                         # Терминальное событие — последним: клиент по нему закрывает
                         # поток и обновляет данные, не выводя завершение из статусов
                         await publish_progress(total, total, "completed", PriceListMessages.VECTORIZED_DONE)
-                        logger.info("Векторизация каталога: завершена, %d строк", total)
+                        logger.info(
+                            "Векторизация каталога: завершена, %d строк, "
+                            "эмбеддинги пересчитаны для %d",
+                            total,
+                            recomputed_total,
+                        )
                     except Exception:
                         await session.rollback()
                         await _mark_failed()
@@ -287,7 +329,7 @@ def reembed_catalog_item(self: Any, item_id: str, name: str) -> dict:
     async def _run() -> dict:
         from app.db.session import async_session_factory
         from app.di.container import create_container
-        from app.repositories.catalog_repository import CatalogRepository
+        from app.repositories.catalog_repository import CatalogRepository, content_hash_of
         from app.services.embedding_service import EmbeddingService
 
         logger.info("Пересчёт эмбеддинга позиции каталога: старт (item_id=%s)", item_id)
@@ -302,7 +344,12 @@ def reembed_catalog_item(self: Any, item_id: str, name: str) -> dict:
                 if item is None:
                     logger.warning("Пересчёт эмбеддинга: позиция не найдена (item_id=%s)", item_id)
                     return {"error": "item not found", "item_id": item_id}
-                await catalog_repo.update(item, {"embedding": list(embedding)})
+                # Обновляем хэш вместе с эмбеддингом: иначе следующая
+                # векторизация посчитает строку unchanged и не пересчитает вектор
+                await catalog_repo.update(item, {
+                    "embedding": list(embedding),
+                    "content_hash": content_hash_of(item.sku, name),
+                })
                 await session.commit()
 
         logger.info("Пересчёт эмбеддинга завершён (item_id=%s)", item_id)

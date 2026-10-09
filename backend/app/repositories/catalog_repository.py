@@ -1,13 +1,24 @@
 """Репозиторий каталога: чтение номенклатуры и пакетная запись из прайс-листов."""
 
+import hashlib
 import uuid
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.models import CatalogItem
+
+
+def content_hash_of(sku: str, name: str) -> str:
+    """SHA-256 хэш содержимого позиции (sku + name).
+
+    Эмбеддинг строится по паре sku + name, поэтому совпадение хэша означает,
+    что пересчёт эмбеддинга не нужен (проблема 3: пропуск неизменных строк
+    при повторной векторизации каталога).
+    """
+    return hashlib.sha256(f"{sku}\n{name}".encode()).hexdigest()
 
 
 class CatalogRepository:
@@ -70,6 +81,27 @@ class CatalogRepository:
         """
         await self._session.rollback()
 
+    async def find_hashes_by_keys(
+        self, keys: list[tuple[str, str]]
+    ) -> dict[tuple[str, str], str]:
+        """Получить существующие content_hash для пар (sku, name).
+
+        Возвращает словарь {(sku, name): content_hash} только для строк,
+        у которых уже есть хэш (не NULL) — используется для определения
+        строк, не требующих пересчёта эмбеддинга (проблема 3).
+        """
+        if not keys:
+            return {}
+        statement = (
+            select(CatalogItem.sku, CatalogItem.name, CatalogItem.content_hash)
+            .where(
+                CatalogItem.content_hash.is_not(None),
+                tuple_(CatalogItem.sku, CatalogItem.name).in_(keys),
+            )
+        )
+        result = await self._session.execute(statement)
+        return {(row.sku, row.name): row.content_hash for row in result}
+
     async def upsert_batch(self, items: list[dict[str, Any]]) -> int:
         """Пакетный UPSERT позиций каталога по уникальной паре (sku, name).
 
@@ -77,8 +109,15 @@ class CatalogRepository:
         обновляет цену/единицу/эмбеддинг существующей позиции вместо попытки
         вставить дубликат, которая упёрлась бы в уникальный индекс.
 
+        Для строк с ``embedding = None`` (неизменённые позиции при повторной
+        векторизации) старый эмбеддинг сохраняется через ``COALESCE``, а
+        ``DO UPDATE`` выполняется только если ``price``, ``unit`` или
+        ``content_hash`` реально изменились — это предотвращает лишнюю
+        переиндексацию HNSW-индекса для тысяч unchanged-строк.
+
         Args:
-            items: список dict с ключами sku, name и необязательными unit, price, embedding.
+            items: список dict с ключами sku, name и необязательными
+                   unit, price, embedding, content_hash.
 
         Returns:
             Количество обработанных строк.
@@ -92,9 +131,19 @@ class CatalogRepository:
             set_={
                 "unit": statement.excluded.unit,
                 "price": statement.excluded.price,
-                "embedding": statement.excluded.embedding,
+                "embedding": func.coalesce(
+                    statement.excluded.embedding, CatalogItem.embedding
+                ),
+                "content_hash": statement.excluded.content_hash,
                 "updated_at": func.now(),
             },
+            where=or_(
+                CatalogItem.price.is_distinct_from(statement.excluded.price),
+                CatalogItem.unit.is_distinct_from(statement.excluded.unit),
+                CatalogItem.content_hash.is_distinct_from(
+                    statement.excluded.content_hash
+                ),
+            ),
         )
         await self._session.execute(statement)
         return len(items)
