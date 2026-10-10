@@ -47,6 +47,24 @@ def _run_async(coro_factory: Any) -> Any:
             loop.run_until_complete(MinioService.close_all())
         except Exception:
             logger.warning("Не удалось закрыть MinIO-клиент после таски", exc_info=True)
+
+        # Остановить GLOBAL_LOGGING_WORKER litellm, пока loop ещё жив: его
+        # _worker_task привязан к этому loop; после loop.close() задача
+        # уничтожается висящей — «Task was destroyed but it is pending» /
+        # «RuntimeError: Event loop is closed» в логах worker перед LLM-вызовом.
+        # stop() отменяет и дожидается всех задач; сброс _queue/_sem/_bound_loop
+        # гарантирует, что следующая таска инициализирует воркер в своём loop
+        # (_ensure_queue проверяет смену loop, но не обрабатывает закрытый).
+        from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+
+        try:
+            loop.run_until_complete(GLOBAL_LOGGING_WORKER.stop())
+            GLOBAL_LOGGING_WORKER._queue = None
+            GLOBAL_LOGGING_WORKER._sem = None
+            GLOBAL_LOGGING_WORKER._bound_loop = None
+        except Exception:
+            logger.warning("Не удалось остановить GLOBAL_LOGGING_WORKER", exc_info=True)
+
         loop.close()
 
 
