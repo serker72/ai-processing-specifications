@@ -343,7 +343,7 @@
 (74 924 → 74 724), загружен тестовый прайс, выполнено подтверждение маппинга и
 векторизация каталога.
 
-1. **`RuntimeError: Event loop is closed` в логах worker перед вызовом LLM для маппинга.**
+1. **`RuntimeError: Event loop is closed` в логах worker перед вызовом LLM для маппинга.** ✅
    * **Причина:** фоновая задача логирования `litellm.LoggingWorker._worker_loop`
      (`litellm/litellm_core_utils/logging_worker.py:122`, litellm 1.97.0) переживает
      закрытие event loop Celery-таски. Таска создаёт собственный loop
@@ -352,8 +352,15 @@
      закрытому loop.
    * **Влияние:** только шум в логах (`Task was destroyed but it is pending!`), на
      выполнение задачи не влияет — `specification.predict_mapping` завершается успешно.
-   * **Статус:** требуется исправление (остановка/сброс `GLOBAL_LOGGING_WORKER` перед
-     закрытием loop либо переиспользование одного loop на процесс воркера).
+   * **Причина (уточнена):** таска создаёт новый event loop (`asyncio.new_event_loop` в
+     `app/worker/tasks.py`) и закрывает его после `run_until_complete`, а глобальный
+     `litellm` `GLOBAL_LOGGING_WORKER` привязан к старому loop — при закрытии loop
+     его `_worker_task` уничтожается висящей задачей.
+   * **Решение (реализовано):** в `_run_async()` перед `loop.close()` вызывается
+     `GLOBAL_LOGGING_WORKER.stop()` (отменяет и дожидается `_worker_task` и все
+     дочерние задачи), затем сбрасываются `_queue`, `_sem`, `_bound_loop` — следующая
+     таска инициализирует воркер в своём loop без конфликтов.
+   * **Статус:** ✅ Реализовано.
 
 2. **401 при подтверждении маппинга прайса — экран не обновляется после `/auth/refresh`.** ✅
    * **Сценарий:** `POST /admin/pricelists/{id}/confirm` → 401 → frontend
