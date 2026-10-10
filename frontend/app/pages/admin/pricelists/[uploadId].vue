@@ -281,9 +281,34 @@ async function saveMapping() {
     toast.success('Маппинг подтверждён, запущена обработка прайс-листа')
     await navigateTo('/admin/pricelists')
   } catch (err: any) {
+    // Сетевая ошибка не означает, что confirm не выполнился: сервер мог принять
+    // маппинг, а ответ потеряться. Уточняем статус — если он ушёл со статусов
+    // подтверждения, команду считаем выполненной и уходим на список; иначе
+    // показываем исходную ошибку.
+    if (await confirmLanded()) {
+      toast.success('Маппинг подтверждён, запущена обработка прайс-листа')
+      await navigateTo('/admin/pricelists')
+      return
+    }
     toast.fromError(err, 'Не удалось подтвердить маппинг')
   } finally {
     isSaving.value = false
+  }
+}
+
+/**
+ * Проверить после сбоя, принял ли backend подтверждение: GET preview отдаёт
+ * статус; пока он в EDITABLE_STATUSES — confirm не прошёл и его можно
+ * повторить. Ошибку статуса трактуем как «не подтверждён»: решение остаётся за
+ * пользователем, а исходная ошибка будет показана.
+ */
+async function confirmLanded(): Promise<boolean> {
+  try {
+    const current: PriceListPreview = await $api(`/admin/pricelists/${uploadId}/preview`)
+    preview.value = current
+    return !EDITABLE_STATUSES.includes(current.status)
+  } catch {
+    return false
   }
 }
 
