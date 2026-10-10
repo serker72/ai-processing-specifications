@@ -9,10 +9,15 @@
  * бы загрузку файлов).
  *
  * 401 → /auth/refresh → повтор исходного запроса (задача 6.1). Рефреш выполняется
- * «чистым» клиентом без интерцептора и однократно на волну 401: параллельные
- * запросы страницы ждут один refresh, а не вызывают его каждый. Если рефреш не
- * помог (refresh-токен истёк или отозван), сессия считается закрытой — состояние
+ * «чистым» клиентом без обёртки и однократно на волну 401: параллельные запросы
+ * страницы ждут один refresh, а не вызывают его каждый. Если рефреш не помог
+ * (refresh-токен истёк или отозван), сессия считается закрытой — состояние
  * очищается и пользователь уходит на /login.
+ *
+ * Повтор при 401 сделан функцией-обёрткой $api, а не интерцептором ofetch
+ * onResponseError: ofetch 1.5.1 игнорирует возвращаемое значение onResponseError
+ * и всегда бросает исходную ошибку, поэтому результат повторного запроса из
+ * интерцептора вызывающему коду не вернуть.
  */
 
 import { defineNuxtPlugin, navigateTo, useState, useRuntimeConfig } from '#imports'
@@ -26,15 +31,34 @@ function isAuthCall(request: unknown): boolean {
   return AUTH_PATHS.some((prefix) => path.includes(prefix))
 }
 
+/**
+ * Опции запроса $api. Тело можно передать функцией () => FormData: ofetch
+ * навешивает на переданный объект FormData проверочный флаг, поэтому повтор с
+ * тем же объектом мог бы уйти без корректного multipart boundary.
+ */
+export interface ApiRequestOptions {
+  method?: string
+  headers?: Record<string, any>
+  query?: Record<string, any>
+  body?: any | (() => FormData)
+  responseType?: 'json' | 'text' | 'blob' | 'arrayBuffer' | 'stream'
+  timeout?: number
+  signal?: AbortSignal
+  [key: string]: any
+}
+
+export type ApiCall = <T = any>(request: string, options?: ApiRequestOptions) => Promise<T>
+
 export default defineNuxtPlugin((nuxtApp) => {
   const config = useRuntimeConfig()
   const apiBase = config.public.apiBase
 
-  // Клиент без интерцептора: нужен для /auth/refresh, чтобы 401 рефреша
+  // Клиент без обёртки 401→refresh: нужен для /auth/refresh, чтобы 401 рефреша
   // не запустил рефреш повторно.
   const rawApi = $fetch.create({
     baseURL: apiBase,
     credentials: 'include',
+    retry: 0,
   })
 
   let refreshInFlight: Promise<boolean> | null = null
@@ -62,31 +86,52 @@ export default defineNuxtPlugin((nuxtApp) => {
     return refreshInFlight
   }
 
-  const $api = $fetch.create({
-    baseURL: apiBase,
-    credentials: 'include',
-    retry: 0,
+  /**
+   * Закрыть сессию: очистить состояние пользователя (те же useState, что у
+   * useAuth) и уйти на вход, сохранив, куда вернуться после логина.
+   */
+  async function signOutAndRedirect(): Promise<void> {
+    useState<AuthUser | null>('auth:user', () => null).value = null
+    useState<boolean>('auth:fetched', () => false).value = true
+    const redirect = import.meta.client ? window.location.pathname : undefined
+    await navigateTo({ path: '/login', query: redirect ? { redirect } : {} })
+  }
 
-    async onResponseError({ request, response, options }) {
-      if (response?.status !== 401 || isAuthCall(request)) {
-        return
+  /**
+   * Клиент API с обработкой 401: рефреш токена и повтор запроса с теми же
+   * опциями — результат повтора получает вызывающий код.
+   *
+   * Повтор ровно один: второй 401 означает «доступа нет», ошибка уходит выше, и
+   * страница решает сама (тост, сообщение в форме). Исключение — ответ 2xx без
+   * тела (204): он не ошибка, и повторять его нельзя — иначе команда,
+   * отдавшая 204, выполнится на сервере дважды.
+   */
+  const $api: ApiCall = async <T = any>(request: string, options: ApiRequestOptions = {}): Promise<T> => {
+    const attempt = (): Promise<T> => {
+      const { body, ...rest } = options
+      const resolved = typeof body === 'function' ? (body as () => any)() : body
+      return rawApi<T>(request, { ...rest, retry: 0, body: resolved })
+    }
+
+    try {
+      return await attempt()
+    } catch (err: any) {
+      const status = err?.statusCode ?? err?.response?.status
+      if (status !== 401 || isAuthCall(request)) {
+        throw err
       }
 
       if (!(await refreshOnce())) {
-        // Сессия закрыта: очищаем состояние пользователя (те же useState, что у
-        // useAuth) и уходим на вход, сохранив, куда вернуться после логина.
-        useState<AuthUser | null>('auth:user', () => null).value = null
-        useState<boolean>('auth:fetched', () => false).value = true
-        const redirect = import.meta.client ? window.location.pathname : undefined
-        await navigateTo({ path: '/login', query: redirect ? { redirect } : {} })
-        return
+        // Сессия закрыта: refresh-токен истёк или отозван — остаётся только
+        // войти заново. Исходную ошибку бросаем выше, чтобы catch страницы
+        // считал запрос завершённым (редирект на /login уже выполнен).
+        await signOutAndRedirect()
+        throw err
       }
 
-      // Повтор с исходными параметрами: baseURL передаём явно, retry оставляем 0,
-      // чтобы повтор не мог породить цепочку повторов.
-      return await $fetch(String(request), { ...options, baseURL: apiBase, retry: 0 })
-    },
-  })
+      return await attempt()
+    }
+  }
 
   return {
     provide: {
