@@ -70,14 +70,6 @@
       </template>
     </div>
 
-    <!-- SSE-лог -->
-    <div v-if="sseMessages.length" class="sse-log">
-      <h3>Лог обработки ({{ sseMessages.length }} событий)</h3>
-      <ul>
-        <li v-for="(msg, i) in sseMessages" :key="i">{{ msg }}</li>
-      </ul>
-    </div>
-
     <!-- Таблица строк -->
     <div v-if="rows.length || showSkeleton" class="table-wrapper">
       <table class="data-table">
@@ -283,7 +275,6 @@ const total = ref(0)
 const loading = ref(false)
 /** Скелетон вместо пустого состояния — только на первой загрузке страницы. */
 const showSkeleton = computed(() => loading.value && rows.value.length === 0)
-const sseMessages = ref<string[]>([])
 
 // Коммерческое предложение
 interface ProposalItem {
@@ -331,8 +322,6 @@ const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize))
 const { open: openStream, stop: stopStream } = useSpecStream({
   onEvent(data) {
     const status = data.status ?? ''
-    const msg = data.message || ''
-    sseMessages.value.push(`[${status}] ${msg}`)
     if (status === 'completed' || status === 'error') {
       loadUploadDetail()
     }

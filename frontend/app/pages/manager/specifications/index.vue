@@ -37,16 +37,21 @@
       @change="handleFileSelect"
       style="display: none"
     />
-    <div v-if="uploadResult" class="result">
-      <h3>Результат загрузки:</h3>
-      <pre>{{ JSON.stringify(uploadResult, null, 2) }}</pre>
+
+    <!-- Ошибка загрузки: человекочитаемое detail из ответа backend -->
+    <div v-if="uploadError" class="upload-error" role="alert">
+      {{ uploadError }}
     </div>
-    <div v-if="sseMessages.length > 0" class="sse-log">
-      <h3>События обработки:</h3>
-      <ul>
-        <li v-for="(msg, index) in sseMessages" :key="index">{{ msg }}</li>
-      </ul>
-    </div>
+
+    <!-- Панель обработки: имя файла + SSE-визуализация + кнопка к результатам -->
+    <CommonProcessingPanel
+      v-if="processing"
+      :file-name="processingFileName"
+      :upload-id="processingUploadId"
+      :sse-active="streamConnected"
+      :sse-error="streamFailed"
+      :state="streamState"
+    />
 
     <!-- Модальное окно создания клиента: POST /manager/clients, затем автовыбор -->
     <div v-if="isClientModalOpen" class="modal-backdrop" @click.self="closeClientModal">
@@ -92,9 +97,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted } from 'vue'
+/**
+ * Загрузка спецификации и панель обработки в реальном времени (проблемы 1–3).
+ *
+ * Убраны сырой JSON ответа и поток текстовых событий SSE: при успехе сразу
+ * открывается CommonProcessingPanel с визуализацией Tier-модели, при ошибке —
+ * инлайн-блок с detail из ответа backend.
+ */
+
+import { computed, reactive, ref, onMounted, onBeforeUnmount } from 'vue'
 import { useSpecStream } from '~/composables/useSpecStream'
+import type { SseStreamEvent } from '~/composables/useSseStream'
 import { useFingerprint } from '~/composables/useFingerprint'
+import type { RowMatchEntry, SpecStreamState } from '~/components/common/ProcessingPanel.vue'
 
 definePageMeta({ layout: 'workspace' })
 
@@ -104,17 +119,35 @@ interface Client {
   inn: string
 }
 
+/** Максимум записей в бегущем логе панели. */
+const LOG_LIMIT = 20
+
 const { init: initFingerprint } = useFingerprint()
 // $api — API-клиент из plugins/api.ts: credentials и повтор запроса после 401
 const { $api } = useNuxtApp() as any
 const toast = useToast()
 const fileInput = ref<any>(null)
 const isUploading = ref(false)
-const uploadResult = ref<any>(null)
-const sseMessages = ref<string[]>([])
 
 const clients = ref<Client[]>([])
 const selectedClientId = ref('')
+
+// Состояние панели обработки (проблемы 1–3)
+const processing = ref(false)
+const processingFileName = ref('')
+const processingUploadId = ref('')
+const uploadError = ref('')
+
+const streamState = reactive<SpecStreamState>({
+  processed: 0,
+  total: 0,
+  phase: 'running',
+  errorMessage: '',
+  tierAuto: 0,
+  tierTopN: 0,
+  tierUnmatched: 0,
+  log: [],
+})
 
 // Создание клиента в модальном окне
 const isClientModalOpen = ref(false)
@@ -137,13 +170,74 @@ const isClientFormValid = computed(
     !!clientForm.value.email
 )
 
+/** Извлечь человекочитаемое detail из ошибки $api (ofetch). */
+function errorDetail(err: any, fallback: string): string {
+  const detail = err?.data?.detail
+  if (typeof detail === 'string' && detail) return detail
+  if (Array.isArray(detail) && detail.length) {
+    const first = detail[0]
+    if (typeof first === 'string') return first
+    if (first?.msg) return String(first.msg)
+  }
+  return fallback
+}
+
+/**
+ * Обработать событие SSE-потока spec_{upload_id}.
+ *
+ * Тип события определяется по полям: ProgressEvent несёт processed/total,
+ * RowMatchEvent — row_number/match_type. События статуса маппинга
+ * (mapping_processing / mapping_predicted) обновляют только фазу.
+ */
+function handleStreamEvent(data: SseStreamEvent) {
+  const status = String(data.status ?? '')
+
+  // Прогресс матчинга: processed/total + терминальные completed/error
+  if (typeof data.processed === 'number' && typeof data.total === 'number') {
+    streamState.processed = data.processed
+    streamState.total = data.total
+    if (status === 'completed') streamState.phase = 'complete'
+    if (status === 'error') {
+      streamState.phase = 'error'
+      streamState.errorMessage = String(data.message ?? '')
+    }
+    return
+  }
+
+  // Обработка строки: счётчик Tier + бегущий лог
+  if (typeof data.row_number === 'number') {
+    const tier = String(data.match_type ?? '')
+    if (tier === 'auto') streamState.tierAuto += 1
+    else if (tier === 'top_n') streamState.tierTopN += 1
+    else streamState.tierUnmatched += 1
+
+    const entry: RowMatchEntry = {
+      row_number: data.row_number,
+      raw_name: String(data.raw_name ?? ''),
+      match_type: tier || null,
+      status: String(data.status ?? ''),
+      timestamp: data.timestamp ? String(data.timestamp) : undefined,
+    }
+    streamState.log = [entry, ...streamState.log].slice(0, LOG_LIMIT)
+    return
+  }
+
+  // Статус LLM-маппинга колонок: числового прогресса нет
+  if (status === 'error') {
+    streamState.phase = 'error'
+    streamState.errorMessage = String(data.message ?? '')
+  }
+}
+
 // Устойчивый SSE: реконнект с backoff и refresh токена перед повторным подключением
-const { open: openStream } = useSpecStream({
-  onEvent(data) {
-    sseMessages.value.push(
-      `[${data.status}] ${data.message || data.raw_name || ''}`
-    )
-  },
+const {
+  open: openStream,
+  stop: stopStream,
+  connected: streamConnected,
+  failed: streamFailed,
+} = useSpecStream({
+  onEvent: handleStreamEvent,
+  onDone: handleStreamEvent,
 })
 
 // Проверяем авторизацию
@@ -156,6 +250,8 @@ onMounted(async () => {
   }
   await loadClients()
 })
+
+onBeforeUnmount(stopStream)
 
 async function loadClients() {
   try {
@@ -205,14 +301,24 @@ function handleUpload() {
   fileInput.value?.click()
 }
 
+function resetStreamState() {
+  streamState.processed = 0
+  streamState.total = 0
+  streamState.phase = 'running'
+  streamState.errorMessage = ''
+  streamState.tierAuto = 0
+  streamState.tierTopN = 0
+  streamState.tierUnmatched = 0
+  streamState.log = []
+}
+
 async function handleFileSelect(event: Event) {
   const target = event.target as HTMLInputElement
   const file = target.files?.[0]
   if (!file) return
 
   isUploading.value = true
-  uploadResult.value = null
-  sseMessages.value = []
+  uploadError.value = ''
 
   try {
     const formData = new FormData()
@@ -225,12 +331,15 @@ async function handleFileSelect(event: Event) {
       body: formData,
     })
 
-    uploadResult.value = response
-    toast.success('Спецификация загружена, начата обработка')
-
-    // Подписываемся на SSE-поток обработки загрузки
+    // Успех: отдельного тоста нет — сразу открываем панель и подписываемся на SSE
+    resetStreamState()
+    processingFileName.value = file.name
+    processingUploadId.value = response.upload_id
+    processing.value = true
     openStream(response.upload_id)
   } catch (err: any) {
+    // Ошибка: инлайн-блок с detail из ответа + тост, панель не открывается
+    uploadError.value = errorDetail(err, 'Не удалось загрузить спецификацию')
     toast.fromError(err, 'Не удалось загрузить спецификацию')
   } finally {
     isUploading.value = false
@@ -249,6 +358,16 @@ async function handleFileSelect(event: Event) {
 
 .client-row .form-control {
   flex: 1;
+}
+
+.upload-error {
+  margin-top: 16px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  background: var(--app-danger-bg);
+  color: var(--app-danger-fg);
+  border: 1px solid var(--app-danger);
+  font-size: 0.9375rem;
 }
 
 .modal-backdrop {
