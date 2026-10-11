@@ -1,5 +1,7 @@
 """Pydantic-схемы для SSE-событий обработки спецификации (Модуль 5)."""
 
+from datetime import UTC, datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -15,6 +17,7 @@ class RowMatchEvent(BaseModel):
     status: str = Field(..., description="Статус строки: matched / unmatched")
     score: float | None = Field(None, description="Схожесть (cosine similarity)")
     message: str = Field(..., description="Сообщение о результате обработки")
+    timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat(), description="Временная метка события (ISO 8601, UTC)")
 
 
 class ProgressEvent(BaseModel):
@@ -26,6 +29,7 @@ class ProgressEvent(BaseModel):
     total: int
     status: str = Field(..., description="pending / processing / completed / error")
     message: str = Field(..., description="Сообщение о статусе")
+    timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat(), description="Временная метка события (ISO 8601, UTC)")
 
 
 class SpecificationStatusEvent(BaseModel):
