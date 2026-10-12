@@ -93,8 +93,9 @@
             <td>{{ row.quantity ?? '—' }}</td>
             <td>{{ row.unit ?? '—' }}</td>
             <td>
-              <span v-if="row.match_type" :class="['status-badge', row.match_type]">
-                {{ row.match_type }}
+              <span v-if="row.match_type" class="match-type-badge">
+                <span class="match-dot" :style="{ background: matchTypeColor(row.match_type) }"></span>
+                {{ matchTypeLabel(row.match_type) }}
               </span>
               <span v-else class="text-muted">—</span>
             </td>
@@ -102,7 +103,24 @@
               <span :class="['status-badge', row.status]">{{ row.status }}</span>
             </td>
             <td>
-              <template v-if="row.matched_item">
+              <template v-if="row.match_type === 'top_n' && row.status !== 'confirmed' && row.status !== 'excluded'">
+                <div class="text-sm mb-1">
+                  <span class="mono">{{ row.matched_item?.sku }}</span> —
+                  {{ row.matched_item?.name ?? '—' }}
+                </div>
+                <select
+                  v-model="rowSelectedCandidate[row.id]"
+                  class="candidate-select"
+                  @focus="ensureRowCandidates(row)"
+                  @change="onCandidateSelect(row)"
+                >
+                  <option value="" disabled>{{ rowCandidateLoading[row.id] ? 'Загрузка…' : 'Выберите позицию…' }}</option>
+                  <option v-for="c in (rowCandidates[row.id] ?? [])" :key="c.id" :value="c.id">
+                    {{ c.sku }} — {{ c.name }} ({{ (c.similarity * 100).toFixed(1) }}%)
+                  </option>
+                </select>
+              </template>
+              <template v-else-if="row.matched_item">
                 <div class="text-sm">
                   <span class="mono">{{ row.matched_item.sku }}</span> —
                   {{ row.matched_item.name }}
@@ -299,6 +317,11 @@ const showConfirmDialog = ref(false)
 const confirmRow = ref<SpecificationRowItem | null>(null)
 const candidates = ref<RowMatchCandidate[]>([])
 
+// Кандидаты по строкам для inline-селекта (ленивая загрузка)
+const rowCandidates = ref<Record<string, RowMatchCandidate[]>>({})
+const rowCandidateLoading = ref<Record<string, boolean>>({})
+const rowSelectedCandidate = ref<Record<string, string | null>>({})
+
 // Подписи статусов
 const STATUS_LABELS: Record<string, string> = {
   pending: 'Ожидает',
@@ -310,6 +333,23 @@ const STATUS_LABELS: Record<string, string> = {
   unmatched: 'Unmatched',
   confirmed: 'Confirmed',
   excluded: 'Excluded',
+}
+
+// Подписи типа совпадения: цветной кружок + человекочитаемый текст
+const MATCH_TYPE_LABELS: Record<string, { label: string; color: string }> = {
+  auto: { label: 'Совпадение', color: 'var(--app-success)' },
+  top_n: { label: 'Найдены кандидаты', color: 'var(--app-warning-fg)' },
+  unmatched: { label: 'Не распознано', color: 'var(--app-danger)' },
+}
+
+function matchTypeLabel(type: string | null): string {
+  if (!type) return '—'
+  return MATCH_TYPE_LABELS[type]?.label ?? type
+}
+
+function matchTypeColor(type: string | null): string {
+  if (!type) return ''
+  return MATCH_TYPE_LABELS[type]?.color ?? ''
 }
 
 function statusLabel(status: string) {
@@ -350,6 +390,10 @@ async function loadRows(p: number) {
     rows.value = response.rows
     total.value = response.total
     page.value = p
+    // Сброс кэша кандидатов при смене страницы
+    rowCandidates.value = {}
+    rowCandidateLoading.value = {}
+    rowSelectedCandidate.value = {}
   } catch (err: any) {
     toast.fromError(err, 'Не удалось загрузить строки')
   } finally {
@@ -393,6 +437,32 @@ async function confirmWithCandidate(candidate: RowMatchCandidate) {
 
 async function excludeRow(row: SpecificationRowItem) {
   await updateRowStatus(row.id, 'excluded', null)
+}
+
+/** Ленивая загрузка кандидатов для top_n-строки (один раз, кэш). */
+async function ensureRowCandidates(row: SpecificationRowItem) {
+  if (rowCandidates.value[row.id] || rowCandidateLoading.value[row.id]) return
+  rowCandidateLoading.value[row.id] = true
+  try {
+    const result = await $api(`/manager/specifications/${uploadId}/rows/${row.id}/matches`, {
+      query: { limit: 10 },
+    })
+    const list = result.candidates || []
+    rowCandidates.value[row.id] = list
+    // Авто-выбор: текущая matched-позиция или первый кандидат
+    const currentId = row.matched_item?.id ?? list[0]?.id ?? null
+    rowSelectedCandidate.value[row.id] = currentId
+  } catch {
+    rowCandidates.value[row.id] = []
+  } finally {
+    rowCandidateLoading.value[row.id] = false
+  }
+}
+
+function onCandidateSelect(row: SpecificationRowItem) {
+  const id = rowSelectedCandidate.value[row.id]
+  if (!id) return
+  updateRowStatus(row.id, 'confirmed', id)
 }
 
 async function updateRowStatus(rowId: string, status: 'confirmed' | 'excluded', catalogItemId: string | null) {
@@ -474,6 +544,33 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.match-type-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.875rem;
+}
+.match-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.candidate-select {
+  width: 100%;
+  padding: 4px 8px;
+  font-size: 0.8125rem;
+  border: 1px solid var(--app-border);
+  border-radius: 4px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  cursor: pointer;
+}
+.candidate-select:focus {
+  outline: none;
+  border-color: var(--app-accent);
+}
 .proposal-panel {
   border: 1px solid var(--app-border);
   border-radius: 8px;
