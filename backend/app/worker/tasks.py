@@ -22,6 +22,7 @@ from app.schemas.sse_events import (
     RowMatchEvent,
     SpecificationStatusEvent,
 )
+from app.services.excel_preview_service import ExcelPreviewService
 from app.worker import celery_app
 
 logger = logging.getLogger(__name__)
@@ -511,21 +512,18 @@ def process_specification(
                     await spec_repo.update_status(upload.id, UploadStatus.processing)
                     await session.commit()
 
-                    # Лист: первая непустая строка — заголовки, дальше — данные
+                    # Лист: строка-шапка определяется эвристикой (как в превью),
+                    # данные — строки после неё; пустые строки отбрасываются.
                     wb = await minio_svc.download_workbook(file_key)
-                    ws = wb.active
-                    sheet_rows = [row for row in ws.iter_rows(values_only=True) if any(v is not None for v in row)]
+                    headers, rows_data = ExcelPreviewService.sheet_headers_and_rows(wb.active.iter_rows())
                     wb.close()
 
-                    if len(sheet_rows) < 2:
+                    if not rows_data:
                         await spec_repo.update_status(upload.id, UploadStatus.completed)
                         await session.commit()
                         await publish_progress(0, 0, "completed", "В файле нет строк данных")
                         logger.info("Обработка спецификации: в файле нет строк данных")
                         return {"upload_id": upload_id, "processed": 0, "total": 0, "status": "completed"}
-
-                    headers = [str(h) if h is not None else "" for h in sheet_rows[0]]
-                    rows_data = sheet_rows[1:]
 
                     # Индексы колонок по маппингу: роль → номер колонки в листе
                     role_keys = {
@@ -534,13 +532,9 @@ def process_specification(
                         "unit_column": "unit",
                         "price_column": "price",
                     }
-                    col_idx: dict[str, int] = {}
-                    for map_key, role in role_keys.items():
-                        title = column_mapping.get(map_key)
-                        if title and title in headers:
-                            col_idx[role] = headers.index(title)
+                    col_idx = ExcelPreviewService.resolve_column_indexes(headers, role_keys, column_mapping)
 
-                    def cell(row: tuple, role: str) -> Any:
+                    def cell(row: list, role: str) -> Any:
                         """Значение колонки роли в строке (None, если колонки нет)."""
                         idx = col_idx.get(role)
                         if idx is None or idx >= len(row):
@@ -554,7 +548,7 @@ def process_specification(
                     for i in range(0, total, BATCH_SIZE_SPEC):
                         batch = rows_data[i : i + BATCH_SIZE_SPEC]
                         for offset, row in enumerate(batch):
-                            row_num = i + offset + 2  # 1-индексация, +1 на строку заголовков
+                            row_num = i + offset + 1  # Порядковый номер строки данных (1-индексация)
                             raw_name = str(cell(row, "name") or "").strip() or str(row[0] or "").strip()
                             if not raw_name:
                                 continue  # Пустая строка не участвует в матчинге

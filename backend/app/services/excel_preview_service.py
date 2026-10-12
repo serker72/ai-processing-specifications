@@ -183,6 +183,49 @@ class ExcelPreviewService:
         finally:
             wb.close()
 
+    @staticmethod
+    def normalize_title(value: object) -> str:
+        """Нормализация имени колонки: пробелы → один, trim, без учёта регистра."""
+        return re.sub(r"\s+", " ", str(value)).strip().casefold()
+
+    @classmethod
+    def resolve_column_indexes(
+        cls, headers: list[str], role_keys: dict[str, str], column_mapping: dict[str, object]
+    ) -> dict[str, int]:
+        """Индексы колонок по маппингу: роль → номер колонки в листе.
+
+        Заголовки и имена из маппинга нормализуются (пробелы/регистр) — иначе
+        «грязные» шапки реальных файлов (« Ед.  изм. ») не совпадают с
+        предсказанным маппингом, и значения колонок теряются.
+        """
+        norm_headers = [cls.normalize_title(h) for h in headers]
+        col_idx: dict[str, int] = {}
+        for map_key, role in role_keys.items():
+            title = column_mapping.get(map_key)
+            if not title:
+                continue
+            norm_title = cls.normalize_title(title)
+            if norm_title in norm_headers:
+                col_idx[role] = norm_headers.index(norm_title)
+        return col_idx
+
+    @classmethod
+    def sheet_headers_and_rows(cls, rows_iter: Any) -> tuple[list[str], list[list[object]]]:
+        """Имена колонок и строки данных из генератора строк листа openpyxl.
+
+        Строка-шапка определяется той же эвристикой, что и в read_preview, —
+        имена совпадают с предсказанным маппингом колонок. В возвращаемые
+        строки данных попадают только строки после шапки, полностью пустые
+        отбрасываются. Генератор читается целиком.
+        """
+        buffered = cls._buffer_rows(rows_iter, cls.HEADER_SEARCH_LIMIT)
+        headers, header_index = cls._headers_from_buffer(buffered)
+        data_rows = buffered[header_index + 1 :]
+        for row in rows_iter:
+            data_rows.append(cls._row_values(row))
+        data_rows = [row for row in data_rows if any(cls._is_filled(v) for v in row)]
+        return headers, data_rows
+
     @classmethod
     def read_headers(cls, fileobj: Any) -> list[str]:
         """Заголовки первого листа (строка-шапка) без чтения строк данных.
