@@ -10,26 +10,26 @@
         {{ statusLabel(uploadDetail?.status ?? '') }}
       </span>
       <span class="text-muted text-sm">
-        Всего строк: {{ uploadDetail?.rows_total ?? '—' }}
+        Всего строк: {{ rowsTotal }}
       </span>
     </div>
 
     <!-- Сводка по статусам строк -->
     <div v-if="Object.keys(rowsByStatus).length" class="row-summary">
       <span>
-        <span :class="['status-badge', 'matched']">matched</span>
+        <span :class="['status-badge', 'matched']">{{ statusLabel('matched') }}</span>
         {{ rowsByStatus.matched ?? 0 }}
       </span>
       <span>
-        <span :class="['status-badge', 'unmatched']">unmatched</span>
+        <span :class="['status-badge', 'unmatched']">{{ statusLabel('unmatched') }}</span>
         {{ rowsByStatus.unmatched ?? 0 }}
       </span>
       <span>
-        <span :class="['status-badge', 'confirmed']">confirmed</span>
+        <span :class="['status-badge', 'confirmed']">{{ statusLabel('confirmed') }}</span>
         {{ rowsByStatus.confirmed ?? 0 }}
       </span>
       <span>
-        <span :class="['status-badge', 'excluded']">excluded</span>
+        <span :class="['status-badge', 'excluded']">{{ statusLabel('excluded') }}</span>
         {{ rowsByStatus.excluded ?? 0 }}
       </span>
     </div>
@@ -81,13 +81,13 @@
             <th>Ед.</th>
             <th>Тип матча</th>
             <th>Статус</th>
-            <th>Позиция каталога</th>
-            <th>Действия</th>
+            <th class="col-catalog">Позиция каталога</th>
+            <th class="col-actions">Действия</th>
           </tr>
         </thead>
         <tbody>
           <CommonTableSkeleton v-if="showSkeleton" :columns="8" />
-          <tr v-for="row in rows" v-else :key="row.id">
+          <tr v-for="row in rows" v-else :key="row.id" :class="{ 'row-excluded': row.status === 'excluded' }">
             <td class="mono">{{ row.row_number }}</td>
             <td>{{ row.raw_name }}</td>
             <td>{{ row.quantity ?? '—' }}</td>
@@ -100,27 +100,10 @@
               <span v-else class="text-muted">—</span>
             </td>
             <td>
-              <span :class="['status-badge', row.status]">{{ row.status }}</span>
+              <span :class="['status-badge', row.status]">{{ statusLabel(row.status) }}</span>
             </td>
-            <td>
-              <template v-if="row.match_type === 'top_n' && row.status !== 'confirmed' && row.status !== 'excluded'">
-                <div class="text-sm mb-1">
-                  <span class="mono">{{ row.matched_item?.sku }}</span> —
-                  {{ row.matched_item?.name ?? '—' }}
-                </div>
-                <select
-                  v-model="rowSelectedCandidate[row.id]"
-                  class="candidate-select"
-                  @focus="ensureRowCandidates(row)"
-                  @change="onCandidateSelect(row)"
-                >
-                  <option value="" disabled>{{ rowCandidateLoading[row.id] ? 'Загрузка…' : 'Выберите позицию…' }}</option>
-                  <option v-for="c in (rowCandidates[row.id] ?? [])" :key="c.id" :value="c.id">
-                    {{ c.sku }} — {{ c.name }} ({{ (c.similarity * 100).toFixed(1) }}%)
-                  </option>
-                </select>
-              </template>
-              <template v-else-if="row.matched_item">
+            <td class="col-catalog">
+              <template v-if="row.matched_item">
                 <div class="text-sm">
                   <span class="mono">{{ row.matched_item.sku }}</span> —
                   {{ row.matched_item.name }}
@@ -131,21 +114,41 @@
               </template>
             </td>
             <td class="table-actions">
-              <!-- Кнопка «Подтвердить» — доступна если есть matched_item или status !== excluded -->
+              <!-- Кнопка «Подтвердить» — сразу PATCH с текущей matched_item (проблема 3) -->
               <button
                 v-if="canConfirm(row)"
-                class="btn-action btn-sm"
+                class="btn-icon"
+                title="Подтвердить"
+                @click="confirmDirect(row)"
+              >
+                &#10003;
+              </button>
+              <!-- Кнопка «Изменить» — модальное окно с кандидатами (только top_n) -->
+              <button
+                v-if="row.match_type === 'top_n'"
+                class="btn-icon"
+                title="Изменить позицию"
                 @click="openConfirmDialog(row)"
               >
-                Подтвердить
+                &#10098;
               </button>
               <!-- Кнопка «Исключить» — доступна если статус не excluded и не confirmed -->
               <button
                 v-if="canExclude(row)"
-                class="btn-delete btn-sm"
+                class="btn-icon danger"
+                title="Исключить"
                 @click="excludeRow(row)"
               >
-                Исключить
+                &#10005;
+              </button>
+              <!-- Кнопка «Возвратить» — только для excluded (проблема 4) -->
+              <button
+                v-if="row.status === 'excluded'"
+                class="btn-icon"
+                title="Вернуть в обработку"
+                @click="returnToProcessing(row)"
+              >
+                &#8617;
               </button>
             </td>
           </tr>
@@ -181,16 +184,16 @@
   <div v-if="showConfirmDialog" class="modal-backdrop" @click.self="showConfirmDialog = false">
     <div class="modal-card">
       <h3>Подтвердить позицию</h3>
-      <p v-if="confirmRow" class="text-sm">
-        <strong>Строка:</strong> {{ confirmRow.raw_name }} (строка {{ confirmRow.row_number }})
+      <p v-if="dialogRow" class="text-sm">
+        <strong>Строка:</strong> {{ dialogRow.raw_name }} (строка {{ dialogRow.row_number }})
       </p>
 
       <!-- Текущая позиция -->
-      <div v-if="confirmRow?.matched_item" class="mb-4">
+      <div v-if="dialogRow?.matched_item" class="mb-4">
         <h4>Текущая позиция:</h4>
         <div class="text-sm">
-          <span class="mono">{{ confirmRow.matched_item.sku }}</span> —
-          {{ confirmRow.matched_item.name }}
+          <span class="mono">{{ dialogRow.matched_item.sku }}</span> —
+          {{ dialogRow.matched_item.name }}
         </div>
         <button class="btn-action btn-sm mt-2" @click="confirmWithExisting()">
           Подтвердить текущую
@@ -294,6 +297,15 @@ const loading = ref(false)
 /** Скелетон вместо пустого состояния — только на первой загрузке страницы. */
 const showSkeleton = computed(() => loading.value && rows.value.length === 0)
 
+/** rows_total обновляется из uploadDetail при загрузке и из SSE ProgressEvent при обработке. */
+const rowsTotal = computed(() => {
+  if (uploadDetail.value) return uploadDetail.value.rows_total
+  return rowsByStatusTotal.value
+})
+const rowsByStatusTotal = computed(() => {
+  return Object.values(rowsByStatus.value).reduce((a, b) => a + b, 0)
+})
+
 // Коммерческое предложение
 interface ProposalItem {
   id: string
@@ -314,25 +326,20 @@ const proposalLoading = ref(false)
 
 // Диалог подтверждения
 const showConfirmDialog = ref(false)
-const confirmRow = ref<SpecificationRowItem | null>(null)
+const dialogRow = ref<SpecificationRowItem | null>(null)
 const candidates = ref<RowMatchCandidate[]>([])
 
-// Кандидаты по строкам для inline-селекта (ленивая загрузка)
-const rowCandidates = ref<Record<string, RowMatchCandidate[]>>({})
-const rowCandidateLoading = ref<Record<string, boolean>>({})
-const rowSelectedCandidate = ref<Record<string, string | null>>({})
-
-// Подписи статусов
+// Подписи статусов — все на русском (проблема 4)
 const STATUS_LABELS: Record<string, string> = {
   pending: 'Ожидает',
   mapping_predicted: 'Маппинг предсказан',
   processing: 'Обработка',
   completed: 'Завершено',
   failed: 'Ошибка',
-  matched: 'Matched',
-  unmatched: 'Unmatched',
-  confirmed: 'Confirmed',
-  excluded: 'Excluded',
+  matched: 'Сопоставлено',
+  unmatched: 'Не распознано',
+  confirmed: 'Подтверждено',
+  excluded: 'Исключено',
 }
 
 // Подписи типа совпадения: цветной кружок + человекочитаемый текст
@@ -365,6 +372,23 @@ const { open: openStream, stop: stopStream } = useSpecStream({
     if (status === 'completed' || status === 'error') {
       loadUploadDetail()
     }
+    // Обновляем rows_total из ProgressEvent (проблема 2)
+    if (typeof data.total === 'number') {
+      if (uploadDetail.value) {
+        uploadDetail.value.rows_total = data.total
+      } else {
+        // uploadDetail ещё не загружен — инициализируем
+        uploadDetail.value = {
+          id: uploadId,
+          filename: '',
+          status: status || 'processing',
+          created_at: '',
+          column_mapping: null,
+          rows_total: data.total,
+          rows_by_status: {},
+        }
+      }
+    }
   },
   onDone() {
     loadUploadDetail()
@@ -390,10 +414,6 @@ async function loadRows(p: number) {
     rows.value = response.rows
     total.value = response.total
     page.value = p
-    // Сброс кэша кандидатов при смене страницы
-    rowCandidates.value = {}
-    rowCandidateLoading.value = {}
-    rowSelectedCandidate.value = {}
   } catch (err: any) {
     toast.fromError(err, 'Не удалось загрузить строки')
   } finally {
@@ -410,7 +430,7 @@ function canExclude(row: SpecificationRowItem) {
 }
 
 async function openConfirmDialog(row: SpecificationRowItem) {
-  confirmRow.value = row
+  dialogRow.value = row
   candidates.value = []
   showConfirmDialog.value = true
 
@@ -426,53 +446,55 @@ async function openConfirmDialog(row: SpecificationRowItem) {
 }
 
 async function confirmWithExisting() {
-  if (!confirmRow.value) return
-  await updateRowStatus(confirmRow.value.id, 'confirmed', confirmRow.value.matched_item?.id)
+  if (!dialogRow.value) return
+  await updateRowStatus(dialogRow.value.id, 'confirmed', dialogRow.value.matched_item?.id)
 }
 
 async function confirmWithCandidate(candidate: RowMatchCandidate) {
-  if (!confirmRow.value) return
-  await updateRowStatus(confirmRow.value.id, 'confirmed', candidate.id)
+  if (!dialogRow.value) return
+  await updateRowStatus(dialogRow.value.id, 'confirmed', candidate.id)
+}
+
+/** Подтвердить строку — сразу PATCH с текущей matched_item (проблема 3). */
+async function confirmDirect(row: SpecificationRowItem) {
+  const catalogItemId = row.matched_item?.id ?? null
+  if (!catalogItemId) {
+    toast.error('Для подтверждения нужна позиция каталога')
+    return
+  }
+  await updateRowStatus(row.id, 'confirmed', catalogItemId)
 }
 
 async function excludeRow(row: SpecificationRowItem) {
   await updateRowStatus(row.id, 'excluded', null)
 }
 
-/** Ленивая загрузка кандидатов для top_n-строки (один раз, кэш). */
-async function ensureRowCandidates(row: SpecificationRowItem) {
-  if (rowCandidates.value[row.id] || rowCandidateLoading.value[row.id]) return
-  rowCandidateLoading.value[row.id] = true
+/** Вернуть исключённую строку в обработку — PATCH со статусом unmatched/matched (проблема 4). */
+async function returnToProcessing(row: SpecificationRowItem) {
+  // Если у строки есть matched_item — возвращаем в matched, иначе в unmatched
+  const status = row.matched_item ? 'matched' : 'unmatched'
+  const catalogItemId = row.matched_item?.id ?? null
   try {
-    const result = await $api(`/manager/specifications/${uploadId}/rows/${row.id}/matches`, {
-      query: { limit: 10 },
+    await $api(`/manager/specifications/${uploadId}/rows/${row.id}`, {
+      method: 'PATCH',
+      body: { status, catalog_item_id: catalogItemId },
     })
-    const list = result.candidates || []
-    rowCandidates.value[row.id] = list
-    // Авто-выбор: текущая matched-позиция или первый кандидат
-    const currentId = row.matched_item?.id ?? list[0]?.id ?? null
-    rowSelectedCandidate.value[row.id] = currentId
-  } catch {
-    rowCandidates.value[row.id] = []
-  } finally {
-    rowCandidateLoading.value[row.id] = false
+    await loadRows(page.value)
+    await loadUploadDetail()
+    await loadProposal()
+  } catch (err: any) {
+    toast.fromError(err, 'Не удалось вернуть строку в обработку')
   }
 }
 
-function onCandidateSelect(row: SpecificationRowItem) {
-  const id = rowSelectedCandidate.value[row.id]
-  if (!id) return
-  updateRowStatus(row.id, 'confirmed', id)
-}
-
-async function updateRowStatus(rowId: string, status: 'confirmed' | 'excluded', catalogItemId: string | null) {
+async function updateRowStatus(rowId: string, status: 'confirmed' | 'excluded' | 'unmatched' | 'matched', catalogItemId: string | null) {
   try {
     await $api(`/manager/specifications/${uploadId}/rows/${rowId}`, {
       method: 'PATCH',
       body: { status, catalog_item_id: catalogItemId },
     })
     showConfirmDialog.value = false
-    confirmRow.value = null
+    dialogRow.value = null
     await loadRows(page.value)
     await loadUploadDetail()
     await loadProposal()
@@ -557,20 +579,6 @@ onBeforeUnmount(() => {
   border-radius: 50%;
   flex-shrink: 0;
 }
-.candidate-select {
-  width: 100%;
-  padding: 4px 8px;
-  font-size: 0.8125rem;
-  border: 1px solid var(--app-border);
-  border-radius: 4px;
-  background: var(--app-surface);
-  color: var(--app-text);
-  cursor: pointer;
-}
-.candidate-select:focus {
-  outline: none;
-  border-color: var(--app-accent);
-}
 .proposal-panel {
   border: 1px solid var(--app-border);
   border-radius: 8px;
@@ -585,5 +593,24 @@ onBeforeUnmount(() => {
 .proposal-warning {
   color: var(--app-danger);
   font-size: 0.875rem;
+}
+
+/* Проблема 1: ширина колонок */
+.col-catalog {
+  min-width: 280px;
+  white-space: normal;
+  word-break: break-word;
+}
+.col-actions {
+  width: 1%;
+  white-space: nowrap;
+}
+
+/* Проблема 4: стили исключённых строк */
+.row-excluded td {
+  text-decoration: line-through;
+  color: var(--app-muted);
+  background: var(--app-surface-muted);
+  opacity: 0.7;
 }
 </style>

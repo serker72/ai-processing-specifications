@@ -155,21 +155,29 @@ const router = useRouter()
 const LOG_LIMIT = 5
 
 /** Пауза между обновлениями UI при троттлинге, мс. */
-const THROTTLE_TIMEOUT = 180
+const THROTTLE_TIMEOUT = 80
 
-const throttled = ref<SpecStreamState>(props.state)
+/** Копия state для троттлинга: reactive-прокси нельзя присвоить в ref — Vue не
+ *  заметит изменения, поэтому делаем поверхностный снимок. */
+function snapshot(s: SpecStreamState): SpecStreamState {
+  return { ...s, log: [...s.log] }
+}
+
+const throttled = ref<SpecStreamState>(snapshot(props.state))
 let throttleTimer: ReturnType<typeof setTimeout> | null = null
 
 watch(
   () => props.state,
   (next) => {
-    if (throttleTimer) return
-    throttled.value = next
-    throttleTimer = setTimeout(() => {
-      throttleTimer = null
-      // Догнать последнее состояние, если за время паузы пришли новые события
-      throttled.value = props.state
-    }, THROTTLE_TIMEOUT)
+    // Первый тик — без задержки: первое событие пакета обновляет UI сразу
+    if (!throttleTimer) {
+      throttled.value = snapshot(next)
+      throttleTimer = setTimeout(() => {
+        throttleTimer = null
+        // Догнать последнее состояние, если за время паузы пришли новые события
+        throttled.value = snapshot(props.state)
+      }, THROTTLE_TIMEOUT)
+    }
   },
   { deep: true },
 )
