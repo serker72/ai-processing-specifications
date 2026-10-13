@@ -102,9 +102,9 @@ class SpecificationRowListResponse(BaseModel):
 
 
 class RowStatusUpdateRequest(BaseModel):
-    """Смена статуса строки менеджером: подтвердить с позицией или исключить."""
+    """Смена статуса строки менеджером: подтвердить, исключить или вернуть в обработку."""
 
-    status: Literal["confirmed", "excluded"] = Field(..., description="Новый статус строки (RowStatus)")
+    status: Literal["confirmed", "excluded", "unmatched"] = Field(..., description="Новый статус строки (RowStatus)")
     catalog_item_id: str | None = Field(
         None, description="Позиция каталога для подтверждения (по умолчанию — уже сопоставленная)"
     )

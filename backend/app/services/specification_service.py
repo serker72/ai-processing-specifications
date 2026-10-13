@@ -261,17 +261,22 @@ class SpecificationService:
         catalog_item_id: uuid.UUID | None,
         matching_service: Any,
     ) -> SpecificationRowItem:
-        """Изменить статус строки: подтвердить с позицией (Tier-1) или исключить.
+        """Изменить статус строки: подтвердить с позицией (Tier-1), исключить или вернуть в обработку.
 
         При подтверждении строка сопоставляется с выбранной позицией каталога,
         а наименование добавляется в HistoricalMatch — следующий такой же
         raw_name сматчится мгновенно на Tier-1.
 
+        Из `excluded` разрешены переходы:
+        * `excluded → unmatched` — возврат в обработку (кнопка «Возвратить»);
+        * `excluded → matched` — если строка уже имеет позицию каталога.
+
         Raises:
             LookupError: загрузка или строка не найдены либо принадлежат другому менеджеру.
             ValueError: неподходящий статус или некорректная пара статус/позиция.
         """
-        if status not in {RowStatus.confirmed.value, RowStatus.excluded.value}:
+        allowed = {RowStatus.confirmed.value, RowStatus.excluded.value, RowStatus.unmatched.value, RowStatus.matched.value}
+        if status not in allowed:
             raise ValueError(SpecificationMessages.ROW_STATUS_UNSUPPORTED)
 
         upload = await self._spec_repo.get_for_manager(upload_id, manager_id)
@@ -282,10 +287,22 @@ class SpecificationService:
         if row is None:
             raise LookupError(SpecificationMessages.ROW_NOT_FOUND)
 
+        # Исключение
         if status == RowStatus.excluded.value:
             await self._spec_repo.update_row_status(row_id, RowStatus.excluded)
             await self._spec_repo.commit()
             return self._row_item(row, raw_name=self._row_raw_name(row))
+
+        # Возврат в обработку: unmatched — без позиции; matched — если есть matched_item
+        if status in (RowStatus.unmatched.value, RowStatus.matched.value):
+            if status == RowStatus.matched.value and row.matched_item_id is None:
+                raise ValueError(SpecificationMessages.REINSTATE_REQUIRES_ITEM)
+            await self._spec_repo.update_row_status(row_id, RowStatus(status))
+            await self._spec_repo.commit()
+            updated = await self._spec_repo.get_row(upload.id, row_id)
+            if updated is None:
+                return self._row_item(row, raw_name=self._row_raw_name(row))
+            return self._row_item(updated, raw_name=self._row_raw_name(row))
 
         # Подтверждение: позиция обязательна (можно передать явно, иначе — уже
         # сопоставленная строке) и должна существовать в каталоге
