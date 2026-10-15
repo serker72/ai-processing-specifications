@@ -132,20 +132,18 @@ class SpecificationService:
             fileobj = await self._minio.download_fileobj(upload.file_key)
             preview = self._excel_preview.read_preview(fileobj, max_rows=50)
 
-            # 2. Предсказать маппинг через LLM
-            predicted_mapping = await self._predict_column_mapping(preview["headers"])
+            # 2. Предсказать маппинг через LLM (заголовки + образцы данных)
+            predicted_mapping = await self._predict_column_mapping(
+                preview["headers"], preview["rows"]
+            )
 
             # 3. Сохранить предсказанный маппинг и обновить статус
             await self._spec_repo.update_mapping(upload.id, predicted_mapping.model_dump())
             await self._spec_repo.update_status(upload.id, UploadStatus.mapping_predicted)
             await self._spec_repo.commit()
 
-            # 4. Запустить фоновую обработку строк через Matching Engine.
-            # Маппинг спецификаций не подтверждается вручную (в отличие от
-            # прайс-листов): предсказали — сразу матчим.
-            from app.worker.tasks import process_specification
-
-            process_specification.delay(str(upload.id), str(upload.manager_id))
+            # 4. Ждать подтверждения маппинга менеджером (endpoint confirm_mapping).
+            # Матчинг строк запускается после подтверждения, не автоматически.
 
             return {
                 "upload_id": str(upload.id),
@@ -156,6 +154,57 @@ class SpecificationService:
             await self._spec_repo.update_status(upload.id, UploadStatus.failed)
             await self._spec_repo.commit()
             raise
+
+    async def get_mapping_preview(self, upload_id: uuid.UUID, manager_id: uuid.UUID) -> dict:
+        """Предпросмотр маппинга колонок: заголовки файла + предсказание LLM.
+
+        Используется UI для экрана подтверждения после события `mapping_predicted`:
+        полный список колонок берётся из файла, предсказанные роли — из column_mapping.
+        """
+        upload = await self._spec_repo.get_for_manager(upload_id, manager_id)
+        if upload is None:
+            raise LookupError(SpecificationMessages.UPLOAD_NOT_FOUND)
+
+        fileobj = await self._minio.download_fileobj(upload.file_key)
+        preview = self._excel_preview.read_preview(fileobj, max_rows=5)
+        return {
+            "upload_id": str(upload.id),
+            "status": upload.status.value,
+            "headers": preview["headers"],
+            "mapping": upload.column_mapping or {},
+        }
+
+    async def confirm_mapping(self, upload_id: uuid.UUID, mapping: dict) -> dict:
+        """Подтвердить/отредактировать маппинг колонок спецификации.
+
+        После подтверждения запускается фоновая обработка строк (матчинг).
+        Если маппинг уже подтверждён или обработка идёт — ValueError.
+        """
+        upload = await self._spec_repo.get_by_id(upload_id)
+        if upload is None:
+            raise LookupError(SpecificationMessages.UPLOAD_NOT_FOUND)
+
+        # Маппинг должен быть в статусе mapping_predicted (не подтверждён ранее)
+        if upload.status != UploadStatus.mapping_predicted:
+            raise ValueError(
+                f"Подтверждение доступно только для статуса mapping_predicted, "
+                f"текущий статус: {upload.status.value}"
+            )
+
+        await self._spec_repo.update_mapping(upload_id, mapping)
+        await self._spec_repo.update_status(upload_id, UploadStatus.processing)
+        await self._spec_repo.commit()
+
+        # Запустить фоновую обработку строк через Matching Engine
+        from app.worker.tasks import process_specification
+
+        process_specification.delay(str(upload_id), str(upload.manager_id))
+
+        return {
+            "upload_id": str(upload_id),
+            "status": UploadStatus.processing.value,
+            "mapping": mapping,
+        }
 
     async def list_uploads(self, manager_id: uuid.UUID) -> list[SpecificationUploadItem]:
         """Список ранее загруженных спецификаций менеджера (свежие — первыми)."""
@@ -311,11 +360,20 @@ class SpecificationService:
         )
         if item_id is None:
             raise ValueError(SpecificationMessages.CONFIRM_REQUIRES_ITEM)
-        if await self._spec_repo.get_catalog_item(item_id) is None:
+
+        catalog_item = await self._spec_repo.get_catalog_item(item_id)
+        if catalog_item is None:
             raise LookupError(SpecificationMessages.CATALOG_ITEM_NOT_FOUND)
 
         raw_name = self._row_raw_name(row)
-        await self._spec_repo.confirm_row(row_id, item_id)
+        await self._spec_repo.confirm_row(
+            row_id,
+            item_id,
+            snapshot_name=catalog_item.name,
+            snapshot_sku=catalog_item.sku,
+            snapshot_price=float(catalog_item.price) if catalog_item.price is not None else None,
+            snapshot_unit=catalog_item.unit,
+        )
         await matching_service.confirm_match(
             raw_name=raw_name,
             catalog_item_id=str(item_id),
@@ -338,6 +396,11 @@ class SpecificationService:
     ) -> RowMatchesResponse:
         """Топ-N кандидатов векторного поиска для строки (для выбора позиции в UI).
 
+        **Ленивый матчинг:** сначала читаем сохранённых кандидатов из таблицы.
+        Если их нет — делаем векторный поиск, сохраняем и возвращаем.
+        Это предотвращает повторный векторный поиск при каждом открытии модалки
+        после подтверждения Tier-1 (когда candidates были бы пустыми).
+
         Raises:
             LookupError: загрузка или строка не найдены либо принадлежат другому менеджеру.
         """
@@ -350,7 +413,33 @@ class SpecificationService:
             raise LookupError(SpecificationMessages.ROW_NOT_FOUND)
 
         raw_name = self._row_raw_name(row)
-        result = await matching_service.match_row(raw_name=raw_name, limit=limit)
+
+        # 1. Сначала читаем сохранённых кандидатов
+        saved_candidates = await self._spec_repo.get_row_candidates(row_id)
+
+        if saved_candidates:
+            # Кандидаты есть — используем их
+            candidates_list = [
+                {
+                    "id": str(c.catalog_item.id),
+                    "sku": c.catalog_item.sku,
+                    "name": c.catalog_item.name,
+                    "unit": c.catalog_item.unit,
+                    "price": c.catalog_item.price,
+                    "similarity": c.score,
+                }
+                for c in saved_candidates
+            ]
+        else:
+            # 2. Ленивый матчинг: векторный поиск + сохранение
+            result = await matching_service.match_row(raw_name=raw_name, limit=limit)
+            candidates_list = result["candidates"]
+            if candidates_list and result["tier"] == "top_n":
+                await self._spec_repo.save_row_candidates(
+                    row_id=row_id,
+                    candidates=candidates_list,
+                    match_tier=result["tier"],
+                )
 
         matched_item: MatchedCatalogItem | None = None
         if row.matched_item is not None:
@@ -373,7 +462,7 @@ class SpecificationService:
                     price=c["price"],
                     similarity=float(c["similarity"]),
                 )
-                for c in result["candidates"]
+                for c in candidates_list
             ],
         )
 
@@ -403,6 +492,11 @@ class SpecificationService:
                 if item is not None
                 else None
             ),
+            is_overridden=row.is_overridden,
+            snapshot_item_name=row.snapshot_item_name,
+            snapshot_sku=row.snapshot_sku,
+            snapshot_price=float(row.snapshot_price) if row.snapshot_price is not None else None,
+            snapshot_unit=row.snapshot_unit,
         )
 
     @staticmethod
@@ -419,22 +513,47 @@ class SpecificationService:
             return None
 
     async def _predict_column_mapping(
-        self, headers: list[str]
+        self, headers: list[str], sample_rows: list[list[object]] | None = None
     ) -> SpecificationMappingPrediction:
-        """Запросить у LLM предсказание ролей колонок спецификации."""
+        """Запросить у LLM предсказание ролей колонок спецификации.
+
+        Используются и заголовки, и образцы содержимого (первые SAMPLE_ROWS_FOR_LLM
+        строк данных) — по одному заголовку невозможно надёжно определить роль,
+        если он неинформативный или неоднозначный.
+        """
         headers_str = ", ".join(f'"{h}"' for h in headers)
-        prompt = (
-            "Определи роли колонок спецификации клиента по их названиям.\n"
-            f"Колонки таблицы: [{headers_str}].\n\n"
-            "Верни JSON строго по схеме:\n"
-            '{"name_column": "<колонка с наименованием товара>", '
-            '"quantity_column": "<колонка с количеством или null>", '
-            '"unit_column": "<колонка с единицей измерения или null>", '
-            '"price_column": "<колонка с ценой или null>", '
-            '"additional_columns": {"<имя колонки>": "<роль>"}\n'
-            "}\n\n"
-            "Значения — точные названия колонок из списка выше."
+        prompt_parts = [
+            "Определи роли колонок спецификации клиента по их названиям и содержимому.",
+            f"Колонки таблицы: [{headers_str}].",
+        ]
+        if sample_rows:
+            rows_str = "\n".join(
+                " | ".join(str(v) if v is not None else "" for v in row) for row in sample_rows[:5]
+            )
+            prompt_parts.append(f"Образцы содержимого (первые строки данных):\n{rows_str}")
+        prompt_parts.extend(
+            [
+                "",
+                "Верни JSON строго по схеме:",
+                (
+                    '{"name_column": "<колонка с наименованием товара>", '
+                    '"quantity_column": "<колонка с количеством или null>", '
+                    '"unit_column": "<колонка с единицей измерения или null>", '
+                    '"price_column": "<колонка с ценой или null>", '
+                    '"additional_columns": {"<имя колонки>": "<роль>"}\n'
+                    "}"
+                ),
+                "",
+                (
+                    "Значения — точные названия колонок из списка выше (строки, не объекты). "
+                    "Пример: "
+                    '{"name_column": "Наименование", "quantity_column": "Количество", '
+                    '"unit_column": "Ед.", "price_column": "Цена", '
+                    '"additional_columns": {}}'
+                ),
+            ]
         )
+        prompt = "\n".join(prompt_parts)
         schema = {
             "type": "object",
             "properties": {
@@ -457,4 +576,5 @@ class SpecificationService:
             prompt,
             schema,
         )
-        return SpecificationMappingPrediction.from_llm_response(result)
+        # Валидировать имена колонок из реального файла — LLM не должен выдумывать
+        return SpecificationMappingPrediction.from_llm_response(result, valid_columns=set(headers))

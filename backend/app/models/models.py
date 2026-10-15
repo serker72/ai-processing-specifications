@@ -208,8 +208,60 @@ class SpecificationRow(Base):
         Enum(RowStatus, name="tp_row_status"), default=RowStatus.pending, comment="Статус строки"
     )
 
+    # Поля для фиксации выбора менеджера и снапшотов товара (Tier-модель)
+    selected_catalog_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("catalog_items.id"),
+        comment="Позиция каталога, выбранная менеджером (для top_n/auto с ручным подтверждением)",
+    )
+    is_overridden: Mapped[bool] = mapped_column(
+        default=False, comment="Флаг: выбор менеджера отличается от автоматического"
+    )
+    snapshot_item_name: Mapped[str | None] = mapped_column(
+        Text, comment="Снапшот наименования товара на момент матчинга (для КП)"
+    )
+    snapshot_sku: Mapped[str | None] = mapped_column(
+        String(255), comment="Снапшот артикула товара на момент матчинга (для КП)"
+    )
+    snapshot_price: Mapped[float | None] = mapped_column(
+        Numeric(12, 2), comment="Снапшот цены товара на момент матчинга (для КП)"
+    )
+    snapshot_unit: Mapped[str | None] = mapped_column(
+        String(50), comment="Снапшот единицы измерения на момент матчинга (для КП)"
+    )
+
     upload: Mapped[SpecificationUpload] = relationship()
     matched_item: Mapped[CatalogItem | None] = relationship()
+    selected_catalog_item: Mapped[CatalogItem | None] = relationship()
+    candidates: Mapped[list["SpecificationRowCandidate"]] = relationship(
+        back_populates="specification_row", cascade="all, delete-orphan"
+    )
+
+
+class SpecificationRowCandidate(Base):
+    """Топ-N кандидатов из Tier-2 для строки спецификации (Tier-модель)."""
+
+    __tablename__ = "specification_row_candidates"
+    __table_args__ = ({"comment": "Кандидаты из векторного поиска для строк спецификации"},)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, comment="Идентификатор кандидата"
+    )
+    specification_row_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("specification_rows.id", ondelete="CASCADE"),
+        index=True,
+        comment="Идентификатор строки спецификации",
+    )
+    catalog_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("catalog_items.id"), comment="Идентификатор позиции каталога"
+    )
+    rank: Mapped[int] = mapped_column(comment="Позиция кандидата в топе (1-based)")
+    score: Mapped[float] = mapped_column(comment="Косинусная схожесть (0.0–1.0)")
+    match_tier: Mapped[str] = mapped_column(
+        String(20), comment="Тип матчинга: auto / top_n"
+    )
+
+    specification_row: Mapped[SpecificationRow] = relationship(back_populates="candidates")
+    catalog_item: Mapped[CatalogItem] = relationship()
 
 
 class HistoricalMatch(Base):

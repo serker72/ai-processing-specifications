@@ -1,5 +1,6 @@
 """Репозиторий для работы с загрузками спецификаций клиентов."""
 
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
@@ -147,12 +148,16 @@ class SpecificationRepository:
     async def list_rows_for_export(self, upload_id: UUID) -> list[SpecificationRow]:
         """Строки для формирования КП: подтверждённые и сопоставленные, по порядку.
 
-        Позиция каталога подгружается заранее (selectinload): цена и артикул
-        берутся из каталога, а не из файла клиента.
+        Позиции каталога подгружаются заранее (selectinload): selected_catalog_item
+        (выбор менеджера) и matched_item (автосопоставление). Цена/артикул берутся
+        из снапшота строки, иначе — из каталога.
         """
         result = await self._session.execute(
             select(SpecificationRow)
-            .options(selectinload(SpecificationRow.matched_item))
+            .options(
+                selectinload(SpecificationRow.matched_item),
+                selectinload(SpecificationRow.selected_catalog_item),
+            )
             .where(
                 SpecificationRow.upload_id == upload_id,
                 SpecificationRow.status.in_([RowStatus.confirmed, RowStatus.matched]),
@@ -169,7 +174,10 @@ class SpecificationRepository:
         """
         result = await self._session.execute(
             select(SpecificationRow)
-            .options(selectinload(SpecificationRow.matched_item))
+            .options(
+                selectinload(SpecificationRow.matched_item),
+                selectinload(SpecificationRow.selected_catalog_item),
+            )
             .where(SpecificationRow.id == row_id, SpecificationRow.upload_id == upload_id)
         )
         return result.scalar_one_or_none()
@@ -185,16 +193,30 @@ class SpecificationRepository:
             row.status = status
             await self._session.flush()
 
-    async def confirm_row(self, row_id: UUID, catalog_item_id: UUID) -> None:
-        """Подтвердить строку: статус confirmed и выбранная позиция каталога.
+    async def confirm_row(
+        self,
+        row_id: UUID,
+        catalog_item_id: UUID,
+        snapshot_name: str | None = None,
+        snapshot_sku: str | None = None,
+        snapshot_price: float | None = None,
+        snapshot_unit: str | None = None,
+    ) -> None:
+        """Подтвердить строку: статус confirmed, выбранная позиция каталога и снапшоты.
 
         Тип матчинга (match_type) не меняется: подтверждение — действие
-        менеджера, а не результат Matching Engine, который отражает match_type.
+        менеджера, а не результат Matching Engine.
         """
         row = await self._session.get(SpecificationRow, row_id)
         if row:
             row.status = RowStatus.confirmed
             row.matched_item_id = catalog_item_id
+            row.selected_catalog_item_id = catalog_item_id
+            row.is_overridden = True
+            row.snapshot_item_name = snapshot_name
+            row.snapshot_sku = snapshot_sku
+            row.snapshot_price = snapshot_price
+            row.snapshot_unit = snapshot_unit
             await self._session.flush()
 
     async def flush(self) -> None:
@@ -216,8 +238,12 @@ class SpecificationRepository:
         matched_item_id: UUID | None = None,
         match_type: str | None = None,
         status: str | None = None,
-    ) -> SpecificationRow:
-        """Создать строку спецификации."""
+        snapshot_item_name: str | None = None,
+        snapshot_sku: str | None = None,
+        snapshot_price: float | None = None,
+        snapshot_unit: str | None = None,
+    ) -> UUID:
+        """Создать строку спецификации (включая снапшоты позиции)."""
         from app.models.models import MatchType, RowStatus
 
         row = SpecificationRow(
@@ -227,10 +253,66 @@ class SpecificationRepository:
             matched_item_id=matched_item_id,
             match_type=MatchType(match_type) if match_type else None,
             status=status if status else RowStatus.pending,
+            snapshot_item_name=snapshot_item_name,
+            snapshot_sku=snapshot_sku,
+            snapshot_price=snapshot_price,
+            snapshot_unit=snapshot_unit,
         )
         self._session.add(row)
         await self._session.flush()
-        return row
+        return row.id
+
+    async def save_row_candidates(
+        self,
+        row_id: UUID,
+        candidates: list[dict],
+        match_tier: str,
+    ) -> None:
+        """Сохранить топ-N кандидатов строки (Tier-2) в specification_row_candidates."""
+        from app.models.models import SpecificationRowCandidate
+
+        for rank, cand in enumerate(candidates, start=1):
+            candidate = SpecificationRowCandidate(
+                specification_row_id=row_id,
+                catalog_item_id=UUID(cand["id"]),
+                rank=rank,
+                score=float(cand["similarity"]),
+                match_tier=match_tier,
+            )
+            self._session.add(candidate)
+        await self._session.flush()
+
+    async def get_row_candidates(self, row_id: UUID) -> list[Any]:
+        """Сохранённые кандидаты строки (по rank) с позицией каталога.
+
+        Пустой список означает «кандидатов ещё нет» — UI/сервис может вызвать
+        ленивый векторный поиск (lazy matching) и сохранить результат.
+        """
+        from app.models.models import SpecificationRowCandidate
+
+        result = await self._session.execute(
+            select(SpecificationRowCandidate)
+            .options(selectinload(SpecificationRowCandidate.catalog_item))
+            .where(SpecificationRowCandidate.specification_row_id == row_id)
+            .order_by(SpecificationRowCandidate.rank)
+        )
+        return list(result.scalars().all())
+
+    async def replace_row_candidates(
+        self,
+        row_id: UUID,
+        candidates: list[dict],
+        match_tier: str,
+    ) -> None:
+        """Заменить кандидатов строки целиком (перематчинг по запросу)."""
+        from app.models.models import SpecificationRowCandidate
+
+        await self._session.execute(
+            delete(SpecificationRowCandidate).where(
+                SpecificationRowCandidate.specification_row_id == row_id
+            )
+        )
+        await self.save_row_candidates(row_id, candidates, match_tier)
 
     async def bulk_create_rows(
         self,

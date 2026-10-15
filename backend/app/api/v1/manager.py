@@ -24,6 +24,11 @@ from app.repositories.session_repository import SessionRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.client import ClientCreate, ClientListResponse, ClientResponse, ClientUpdate
 from app.schemas.confirm_match import ConfirmMatchRequest, ConfirmMatchResponse
+from app.schemas.confirm_spec_mapping import (
+    ConfirmSpecificationMappingRequest,
+    ConfirmSpecificationMappingResponse,
+    MappingPreviewResponse,
+)
 from app.schemas.matching import MatchRequest, MatchResponse
 from app.schemas.proposal import ProposalGenerateRequest, ProposalItem, ProposalListResponse
 from app.schemas.specification import (
@@ -441,6 +446,90 @@ async def upload_specification(
         ) from e
 
     return result
+
+
+@manager_router.get(
+    "/specifications/{upload_id}/mapping-preview",
+    response_model=MappingPreviewResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Предпросмотр маппинга колонок: заголовки файла + предсказание LLM",
+)
+async def get_specification_mapping_preview(
+    upload_id: str,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    specification_service: FromDishka[SpecificationService],
+) -> MappingPreviewResponse:
+    """Заголовки колонок и предсказанный маппинг для экрана подтверждения."""
+    manager: User = await get_current_manager(
+        request, settings, security_service, session_repository, user_repository
+    )
+    try:
+        result = await specification_service.get_mapping_preview(
+            upload_id=parse_upload_id(upload_id),
+            manager_id=manager.id,
+        )
+        return MappingPreviewResponse(**result)
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
+
+
+@manager_router.post(
+    "/specifications/{upload_id}/confirm-mapping",
+    response_model=ConfirmSpecificationMappingResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Подтвердить/отредактировать маппинг колонок спецификации перед матчингом",
+)
+async def confirm_specification_mapping(
+    upload_id: str,
+    payload: ConfirmSpecificationMappingRequest,
+    request: Request,
+    settings: FromDishka[Settings],
+    security_service: FromDishka[SecurityService],
+    session_repository: FromDishka[SessionRepository],
+    user_repository: FromDishka[UserRepository],
+    specification_service: FromDishka[SpecificationService],
+) -> ConfirmSpecificationMappingResponse:
+    """Подтвердить или отредактировать маппинг колонок спецификации.
+
+    После подтверждения запускается матчинг строк. Если маппинг уже подтверждён
+    или обработка уже идёт — возвращается 400.
+    """
+    # Результат не используется в теле, но вызов обязателен: проверка авторизации (401/403)
+    await get_current_manager(request, settings, security_service, session_repository, user_repository)
+    try:
+        result = await specification_service.confirm_mapping(
+            upload_id=parse_upload_id(upload_id),
+            mapping=payload.model_dump(),
+        )
+        return ConfirmSpecificationMappingResponse(
+            upload_id=str(upload_id),
+            status=result["status"],
+            mapping=result["mapping"],
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        ) from e
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=CommonMessages.INTERNAL_ERROR,
+        ) from e
 
 
 @manager_router.post(

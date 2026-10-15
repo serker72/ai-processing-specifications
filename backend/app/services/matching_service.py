@@ -13,7 +13,7 @@ class MatchingService:
     """Трёхуровневый Matching Engine для сопоставления строк спецификации с каталогом."""
 
     TIER2_LIMIT = 5
-    TIER2_MIN_SCORE = 0.70
+    TIER2_MIN_SCORE = 0.80
 
     def __init__(
         self,

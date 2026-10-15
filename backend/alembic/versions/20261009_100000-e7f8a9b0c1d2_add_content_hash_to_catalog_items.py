@@ -16,6 +16,7 @@ import hashlib
 from collections.abc import Iterator
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision: str = "e7f8a9b0c1d2"

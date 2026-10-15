@@ -179,23 +179,40 @@ class ProposalService:
         return HTML(string=html).write_pdf()
 
     def _build_context(self, proposal: Proposal, rows: list[Any], settings: Any) -> dict:
-        """Контекст рендеринга КП (см. app/services/proposal_template_default.py)."""
+        """Контекст рендеринга КП (см. app/services/proposal_template_default.py).
+
+        Приоритет источника данных: снапшот строки (на момент матчинга) →
+        selected_catalog_item (выбор менеджера) → matched_item (автоматический).
+        Это гарантирует стабильность КП при изменении каталога.
+        """
         items = []
         total = 0.0
         for index, row in enumerate(rows, start=1):
             raw = row.raw_data or {}
             quantity = self._as_number(raw.get("quantity")) or 0.0
-            price = float(row.matched_item.price) if row.matched_item.price is not None else 0.0
-            row_sum = quantity * price
+
+            # Разрешение позиции: выбор менеджера → автосопоставление
+            item = row.selected_catalog_item or row.matched_item
+            # Цена/наименование/артикул/единица: из снапшота, иначе из каталога
+            name = row.snapshot_item_name or (item.name if item else "")
+            sku = row.snapshot_sku or (item.sku if item else "")
+            unit = row.snapshot_unit or (item.unit if item else None)
+            price_value = (
+                float(row.snapshot_price)
+                if row.snapshot_price is not None
+                else (float(item.price) if item and item.price is not None else 0.0)
+            )
+
+            row_sum = quantity * price_value
             total += row_sum
             items.append(
                 {
                     "index": index,
-                    "name": row.matched_item.name,
-                    "sku": row.matched_item.sku,
-                    "unit": row.matched_item.unit,
+                    "name": name,
+                    "sku": sku,
+                    "unit": unit,
                     "quantity": self._fmt_qty(quantity),
-                    "price": self._fmt_amount(price),
+                    "price": self._fmt_amount(price_value),
                     "sum": self._fmt_amount(row_sum),
                 }
             )
@@ -227,24 +244,34 @@ class ProposalService:
 
     @staticmethod
     def _included_rows(rows: list[Any]) -> list[Any]:
-        """Строки, попадающие в КП: есть позиция каталога и заполнено количество."""
-        return [
-            row
-            for row in rows
-            if row.matched_item is not None
-            and ProposalService._as_number((row.raw_data or {}).get("quantity")) is not None
-        ]
+        """Строки, попадающие в КП: есть позиция каталога (quantity опционально)."""
+        return [row for row in rows if row.matched_item is not None]
 
     @staticmethod
     def _fingerprint(rows: list[Any]) -> str:
-        """SHA-256 канонического состава строк для контроля изменений после формирования."""
+        """SHA-256 канонического состава строк для контроля изменений после формирования.
+
+        Учитывает выбранные позиции (selected/matched) и цену из снапшота или
+        каталога — иначе fingerprint не отразит реальное содержимое КП.
+        """
         payload = [
             {
                 "id": str(row.id),
                 "status": row.status.value if hasattr(row.status, "value") else str(row.status),
+                "selected_catalog_item_id": (
+                    str(row.selected_catalog_item_id) if row.selected_catalog_item_id else None
+                ),
                 "matched_item_id": str(row.matched_item_id) if row.matched_item_id else None,
                 "quantity": ProposalService._as_number((row.raw_data or {}).get("quantity")),
-                "price": float(row.matched_item.price) if row.matched_item and row.matched_item.price is not None else None,
+                "price": (
+                    float(row.snapshot_price)
+                    if row.snapshot_price is not None
+                    else (
+                        float(row.matched_item.price)
+                        if row.matched_item and row.matched_item.price is not None
+                        else None
+                    )
+                ),
             }
             for row in rows
         ]

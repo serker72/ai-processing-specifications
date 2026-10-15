@@ -1,5 +1,6 @@
 """Pydantic-схемы для предсказания маппинга колонок спецификации (Модуль 5)."""
 
+import re
 from datetime import datetime
 from typing import Literal
 
@@ -16,21 +17,57 @@ class SpecificationMappingPrediction(BaseModel):
     additional_columns: dict[str, str] = Field(default_factory=dict, description="Доп. колонки: {имя_колонки: роль}")
 
     @classmethod
-    def from_llm_response(cls, response: dict) -> "SpecificationMappingPrediction":
-        """Создать объект из ответа LLM с валидацией."""
+    def from_llm_response(
+        cls, response: dict, valid_columns: set[str] | None = None
+    ) -> "SpecificationMappingPrediction":
+        """Создать объект из ответа LLM с валидацией имён колонок.
+
+        Если LLM вернул имя, которого нет в файле — заменяет на ближайший
+        вариант из `valid_columns` (по вхождению подстроки) или `None`.
+        """
+
+        @staticmethod
+        def _resolve(value: str | None, valid: set[str] | None) -> str | None:
+            if not value:
+                return None
+            if valid is not None and value in valid:
+                return value
+            if valid is not None:
+                # Попытка найти по нечёткому вхождению (casefold, без лишних пробелов)
+                normalized = re.sub(r"\s+", " ", value).casefold()
+                for candidate in valid:
+                    if normalized in re.sub(r"\s+", " ", candidate).casefold():
+                        return candidate
+            return None
+
+        from app.services.excel_preview_service import ExcelPreviewService
+
+        # Нормализованные ключи для сравнения
+        norm_valid: set[str] | None = None
+        if valid_columns:
+            norm_valid = {
+                ExcelPreviewService.normalize_title(c) for c in valid_columns
+            }
+
+        name_col = _resolve(response.get("name_column"), norm_valid) or ""
+        quantity_col = _resolve(response.get("quantity_column"), norm_valid)
+        unit_col = _resolve(response.get("unit_column"), norm_valid)
+        price_col = _resolve(response.get("price_column"), norm_valid)
+
         additional: dict[str, str] = {}
-        # Дополнительные колонки — те, что НЕ вошли в основные поля
         for key, value in response.items():
             if key in ("name_column", "quantity_column", "unit_column", "price_column"):
                 continue
             if isinstance(value, str):
-                additional[key] = value
+                resolved = _resolve(value, norm_valid)
+                if resolved is not None:
+                    additional[key] = resolved
 
         return cls(
-            name_column=response.get("name_column", ""),
-            quantity_column=response.get("quantity_column"),
-            unit_column=response.get("unit_column"),
-            price_column=response.get("price_column"),
+            name_column=name_col,
+            quantity_column=quantity_col,
+            unit_column=unit_col,
+            price_column=price_col,
             additional_columns=additional,
         )
 
@@ -90,6 +127,11 @@ class SpecificationRowItem(BaseModel):
     match_type: str | None = Field(None, description="Тип матчинга: auto / top_n / unmatched")
     status: str = Field(..., description="Статус строки (RowStatus)")
     matched_item: MatchedCatalogItem | None = Field(None, description="Сопоставленная позиция каталога")
+    is_overridden: bool = Field(False, description="Флаг: выбор менеджера отличается от автосопоставления")
+    snapshot_item_name: str | None = Field(None, description="Снапшот наименования на момент матчинга")
+    snapshot_sku: str | None = Field(None, description="Снапшот артикула на момент матчинга")
+    snapshot_price: float | None = Field(None, description="Снапшот цены на момент матчинга")
+    snapshot_unit: str | None = Field(None, description="Снапшот единицы на момент матчинга")
 
 
 class SpecificationRowListResponse(BaseModel):

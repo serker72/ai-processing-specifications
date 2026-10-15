@@ -4,8 +4,11 @@ Smoke-тест: Задача 5.1 — Приём файлов клиентов.
 Запуск:
     docker compose exec -T backend python3 /app/tests/smoke/test_51_specification_upload.py
 """
-import json, urllib.request, io, zipfile, time
-from urllib.error import HTTPError
+import io
+import json
+import time
+import urllib.request
+import zipfile
 
 BASE = "http://backend:8000/api/v1"
 EMAIL = "smoke@example.com"

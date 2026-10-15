@@ -552,6 +552,8 @@ def process_specification(
                             raw_name = str(cell(row, "name") or "").strip() or str(row[0] or "").strip()
                             if not raw_name:
                                 continue  # Пустая строка не участвует в матчинге
+                            if raw_name.lower() in ("итого", "итого позиций", "итого по позициям", "итого позиций:"):
+                                continue  # Строки-суммы не являются товарами
 
                             match_result = await matching_svc.match_row(raw_name=raw_name)
                             tier = match_result["tier"]
@@ -566,7 +568,19 @@ def process_specification(
                             else:
                                 match_type_enum, row_status = MatchType.auto, RowStatus.matched
 
-                            await spec_repo.create_row(
+                            # Снапшот товара на момент матчинга (для стабильного КП)
+                            snapshot_name = None
+                            snapshot_sku = None
+                            snapshot_price = None
+                            snapshot_unit = None
+                            if match_result["matched_item"]:
+                                mi = match_result["matched_item"]
+                                snapshot_name = mi["name"]
+                                snapshot_sku = mi["sku"]
+                                snapshot_price = float(mi["price"]) if mi["price"] is not None else None
+                                snapshot_unit = mi["unit"]
+
+                            row_id = await spec_repo.create_row(
                                 upload_id=UUID(upload_id),
                                 row_number=row_num,
                                 raw_data={
@@ -578,9 +592,25 @@ def process_specification(
                                 matched_item_id=UUID(matched_id) if matched_id else None,
                                 match_type=match_type_enum.value,
                                 status=row_status.value,
+                                snapshot_item_name=snapshot_name,
+                                snapshot_sku=snapshot_sku,
+                                snapshot_price=snapshot_price,
+                                snapshot_unit=snapshot_unit,
                             )
 
+                            # Сохранение кандидатов Tier-2 (только для top_n)
+                            if tier == "top_n" and match_result.get("candidates"):
+                                await spec_repo.save_row_candidates(
+                                    row_id=row_id,
+                                    candidates=match_result["candidates"],
+                                    match_tier=tier,
+                                )
+
                             processed += 1
+
+                            # Публикуем прогресс после каждой строки для real-time обновления UI
+                            await publish_progress(processed, total, "processing", f"Обработано {processed}/{total} строк")
+                            logger.info("Обработка спецификации: обработано %d/%d строк", processed, total)
 
                             await redis_pubsub.publish(
                                 channel,
@@ -598,10 +628,8 @@ def process_specification(
                                 buffered=True,
                             )
 
-                        # Прогресс виден в UI до окончания обработки всего файла
+                        # Фиксация батча в БД
                         await session.commit()
-                        await publish_progress(processed, total, "processing", f"Обработано {processed}/{total} строк")
-                        logger.info("Обработка спецификации: обработано %d/%d строк", processed, total)
 
                     await spec_repo.update_status(upload.id, UploadStatus.completed)
                     await session.commit()
