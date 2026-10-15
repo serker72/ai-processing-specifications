@@ -436,31 +436,30 @@
    * **Статус:** ✅ Реализовано.
 
 5. **Неудобная пагинация и отсутствие сортировки в таблицах.**
-   * Пагинация только «вперёд/назад»; нет перехода на первую/последнюю/указанную
-     страницу, нет выбора размера страницы.
-   * Нет сортировки по колонкам таблицы.
-   * **Исследование (что есть сейчас):**
-     * `frontend/app/pages/admin/pricelists/index.vue` (строки 104–120) — только
-       «← Назад» / «Вперёд →», фиксированный `PAGE_SIZE = 20`. Backend
-       `GET /admin/pricelists` (`backend/app/api/v1/admin.py:182`) принимает только
-       `page`, `page_size`, `status`; сортировка жёстко `created_at DESC`
-       (`price_list_repository.list_filtered`).
-     * `frontend/app/pages/admin/catalog.vue` (строки 90–104) — только «Назад» /
-       «Вперёд», фиксированный `PAGE_SIZE = 50`. Backend `GET /admin/catalog`
-       (`admin.py:328`) принимает `page`, `page_size`, `search`; сортировка жёстко
-       `name ASC` (`catalog_repository.list_items`).
-     * `frontend/app/pages/manager/specifications/[uploadId].vue` (строки 140–160) —
-       только «← Назад» / «Вперёд →». Backend `GET .../rows`
-       (`manager.py:236`) принимает `page`, `page_size`, `status`; сортировка жёстко
-       `row_number ASC` (`specification_repository.list_rows`).
-     * `frontend/app/pages/manager/uploads.vue` — пагинации нет вовсе: backend
-       `GET /manager/specifications` (`manager.py:175`) отдаёт весь список менеджера
-       (`list_by_manager`, `created_at DESC`) без `page`/`page_size`.
-   * **Ни один backend-эндпоинт не принимает параметр сортировки** — для сортировки по
-     колонкам потребуется добавить `sort_by`/`sort_order` в API и репозитории.
-   * **Статус:** требуется доработка backend (сортировка, при необходимости — пагинация
-     списка спецификаций менеджера) и frontend (компонент пагинации с переходом на
-     первую/последнюю/указанную страницу + клики по заголовкам колонок).
+    * Пагинация только «вперёд/назад»; нет перехода на первую/последнюю/указанную
+      страницу, нет выбора размера страницы.
+    * Нет сортировки по колонкам таблицы.
+    * **Исследование (что есть сейчас):**
+      * `frontend/app/pages/admin/pricelists/index.vue` (строки 104–120) — только
+        «← Назад» / «Вперёд →», фиксированный `PAGE_SIZE = 20`. Backend
+        `GET /admin/pricelists` (`backend/app/api/v1/admin.py:182`) принимает только
+        `page`, `page_size`, `status`; сортировка жёстко `created_at DESC`
+        (`price_list_repository.list_filtered`).
+      * `frontend/app/pages/admin/catalog.vue` (строки 90–104) — только «Назад» /
+        «Вперёд», фиксированный `PAGE_SIZE = 50`. Backend `GET /admin/catalog`
+        (`admin.py:328`) принимает `page`, `page_size`, `search`; сортировка жёстко
+        `name ASC` (`catalog_repository.list_items`).
+      * `frontend/app/pages/manager/specifications/[uploadId].vue` (строки 140–160) —
+        только «← Назад» / «Вперёд →». Backend `GET .../rows`
+        (`manager.py:236`) принимает `page`, `page_size`, `status`; сортировка жёстко
+        `row_number ASC` (`specification_repository.list_rows`).
+      * `frontend/app/pages/manager/uploads.vue` — пагинации нет вовсе: backend
+        `GET /manager/specifications` (`manager.py:175`) отдаёт весь список менеджера
+        (`list_by_manager`, `created_at DESC`) без `page`/`page_size`.
+    * **Ни один backend-эндпоинт не принимает параметр сортировки** — для сортировки по
+      колонкам потребуется добавить `sort_by`/`sort_order` в API и репозитории.
+    * **Статус:** ⚠️ частично — пагинация не тронута, сортировка по колонкам не реализована.
+      Отложено до завершения основной функциональности.
 
 
 ## Обнаруженные проблемы (ручное тестирование загрузки спецификации, 2026-10-10)
@@ -733,3 +732,535 @@
           `{{ statusLabel('matched') }}`.
      * **Статус:** ✅ выполнено.
 
+
+## План реализации универсального инференса (GPU / CPU ONNX / CPU OpenVINO)
+
+1. **Обновление зависимостей (`backend/pyproject.toml`).**
+   * Добавить библиотеку optimum[onnxruntime]>=1.20.0 в основные зависимости.
+   * Добавить опциональный блок intel = ["optimum-intel>=1.18.0", "openvino>=2024.0.0"] на случай локального использования или доустановки.
+
+2. **Модификация Dockerfile (Универсальная сборка).**
+   * Добавить аргумент сборки ARG WORKER_CUDA_VISIBLE_DEVICES="".
+   * Настроить условную установку PyTorch через uv pip install: с индексом --index-url [https://download.pytorch.org/whl/cpu](https://download.pytorch.org/whl/cpu), если аргумент пуст (сборка под CPU), или стандартный PyTorch с поддержкой CUDA, если аргумент передан.
+   * Добавить шаг сохранения флага процессора (IS_INTEL_CPU=true/false) в файл /app/.env_build при сборке под архитектуру x86_64 с GenuineIntel.
+   * Настроить копирование скриптов и установить ENTRYPOINT.
+
+3. **Создание скрипта экспорта (`backend/scripts/export_model.sh`).**
+   * Считать переменные из /app/.env_build.
+   * Добавить проверку: если в окружении задана GPU (DEVICE=cuda или аналоги), пропускать экспорт за ненадобностью (так как GPU работает через нативный PyTorch).
+   * Для CPU выполнять условный экспорт через optimum-cli в формат OpenVINO (если IS_INTEL_CPU=true) или ONNX (для остальных CPU) в папку MODEL_CACHE_DIR (с поведением Fail-Fast при ошибках).
+
+4. **Создание Entrypoint-обертки (`backend/scripts/entrypoint.sh`).**
+   * Вызывать export_model.sh при старте контейнера.
+   * Передавать управление основному процессу через exec "$@".
+
+5. **Обновление `EmbeddingService` (`backend/app/services/embedding_service.py`).**
+   * Обновить логику свойства model для реализации ветвления:
+     * Если устройство (device) содержит cuda — инициализировать стандартный SentenceTransformer с бэкендом PyTorch на GPU.
+     * Если устройство cpu — проверить наличие оптимизированных файлов (model.onnx или openvino_model.xml) в MODEL_CACHE_DIR и загрузить SentenceTransformer из этой папки.
+     * Оставить сигнатуры методов кодирования (embed_query, embed_passages) без изменений.
+
+6. **Настройка окружения (`docker-compose.yml`).**
+   * Добавить секцию build.args с параметром WORKER_CUDA_VISIBLE_DEVICES (для GPU-серверов) и настроить переменную окружения EMBEDDING__DEVICE (cuda или cpu).
+   * Для GPU-контейнеров добавить конфигурацию deploy.resources.reservations.devices с пробросом драйвера nvidia.
+   * Добавить переменные `MODEL_CACHE_DIR` и `HF_HOME` для воркеров и бэкенда.
+
+
+## Обнаруженные проблемы (ручное тестирование test-spec-modified.xlsx, 2026-10-13)
+
+По результатам тестирования файла `test-spec-modified.xlsx`:
+
+1. **Прогресс в общем блоке панели обработки обновляется с задержкой.**
+    * При загрузке индикация в секциях заметно улучшилась, а вот в общем блоке
+      `Обработка файла: test-spec-modified.xlsx` не меняется ни %, ни кол-во
+      обработанных строк до 46 %.
+    * **Статус:** ✅ решено в рамках Пункта 1-3 (publish_progress после каждой строки + первый тик без задержки).
+      Требуется проверка на реальном тестовом файле.
+
+2. **Список записей спецификации:**
+    * На кнопке изменения почему-то указана `❲`.
+    * Для записи в статусе `Сопоставлено` избыточная кнопка `Подтвердить позицию`.
+    * После подтверждения пропадают кнопки `Подтвердить`, `Исключить позицию`,
+      но остается кнопка `Изменить позицию`, при клике на которую в модальном
+      окне нет записей, подобранных LLM.
+    * Нет записей со статусом `match_type=unmatched`.
+    * **Статус:** ✅ все подпункты решены (Пункты 2, 4, 7):
+      - иконка `✎` (`&#9998;`) — Пункт 2;
+      - убрана кнопка «Подтвердить» для auto — Пункт 2;
+      - модалка показывает сообщение «Кандидаты недоступны» — Пункт 2;
+      - сохранение кандидатов в таблицу `specification_row_candidates` — Пункт 7.
+
+3. **Запрос подтверждения маппинга колонок не отображается.**
+    * Никакого запроса подтверждения маппинга колонок не отображалось,
+      после задержки сразу пошла обработка.
+    * **Статус:** ✅ решено в рамках Пункта 6 — добавлен endpoint `POST .../confirm-mapping` и UI-форма подтверждения.
+
+4. **Включается в список итоговая строка «Итого позиций:».**
+    * Итоговая строка попадает в БД и попадает в результат матчинга.
+    * **Статус:** ✅ решено в рамках Пункта 1 (пропуск строк с «Итого…»).
+
+5. **Не формируется КП.**
+    * При нажатии «Сформировать КП» возвращается ошибка: «Нет строк для
+      формирования КП (нужны подтверждённые или сопоставленные строки)».
+    * **Статус:** ✅ решено в рамках Пунктов 1 и 5:
+      - `_included_rows` теперь не требует quantity (Пункт 1);
+      - LLM-маппер теперь видит образцы данных и правильно определяет `quantity_column` (Пункт 5);
+      - КП использует снапшоты позиции, а не текущий каталог (Пункт 7).
+
+2. **Список записей спецификации:**
+   * На кнопке изменения почему-то указана `❲`.
+   * Для записи в статусе `Сопоставлено` избыточная кнопка `Подтвердить позицию`.
+   * После подтверждения пропадают кнопки `Подтвердить`, `Исключить позицию`,
+     но остается кнопка `Изменить позицию`, при клике на которую в модальном
+     окне нет записей, подобранных LLM.
+   * Нет записей со статусом `match_type=unmatched`.
+   * **Статус:** требуется доработка.
+
+По результатам тестирования файла `test-spec-mapping-test.xlsx`:
+
+3. **Запрос подтверждения маппинга колонок не отображается.**
+   * Никакого запроса подтверждения маппинга колонок не отображалось,
+     после задержки сразу пошла обработка.
+   * **Статус:** требуется доработка.
+
+4. **Включается в список итоговая строка «Итого позиций:».**
+   * Итоговая строка попадает в БД и попадает в результат матчинга.
+   * **Статус:** требуется доработка.
+
+5. **Не формируется КП.**
+   * При нажатии «Сформировать КП» возвращается ошибка: «Нет строк для
+     формирования КП (нужны подтверждённые или сопоставленные строки)».
+   * **Статус:** требуется доработка.
+
+
+## План доработки архитектуры и функционала Tier модели
+
+1. **Модификация структуры базы данных (`specification_rows`).**
+   * Добавить поля для снапшотов товара: `snapshot_item_name`, `snapshot_sku`,
+     `snapshot_price`, `snapshot_unit`.
+   * Добавить поля для ручного управления: `selected_catalog_item_id` (FK)
+     и флаг `is_overridden` (Boolean).
+
+2. **Создание таблицы истории кандидатов (`specification_row_candidates`).**
+   * Создать таблицу для хранения Top-N вариантов сопоставления, связанных
+     со строкой спецификации (`specification_row_id`), с полями
+     `catalog_item_id`, `rank`, `score` и `match_tier`.
+
+3. **Реализация ленивого векторного поиска (Lazy Matching API).**
+   * Создать эндпоинт для принудительного вызова векторного поиска
+     по конкретной строке спецификации, если её пул кандидатов ещё не сформирован.
+
+4. **Доработка логики формирования и пересчета КП.**
+   * Обеспечить построение коммерческих предложений и их переформирование
+     строго по зафиксированным снапшотам, исключая влияние изменений
+     в общем каталоге.
+
+5. **Обновление интерфейса (UI).**
+   * Добавить возможность просмотра Top-N кандидатов и смены позиции для строк,
+     сработавших по историческому тиру. Визуально подсвечивать текущий выбор
+     без его блокировки.
+
+
+## Ход работ 2026-10-13: диагностика и начатые исправления
+
+### Диагностика проблем (по БД и логам worker)
+
+Проверено на загрузках `test-spec-modified.xlsx` (upload `7adb0cce`) и
+`test-spec-mapping-test.xlsx` (upload `b74fcd8f`):
+
+1. **Прогресс "застывает до 46 %" — ПРИЧИНА:** worker публиковал
+   `ProgressEvent` только ПОСЛЕ COMMIT всего батча (`BATCH_SIZE_SPEC`),
+   а не после каждой строки. Фронтенд честно рисовал последние полученные
+данные. **✅ ИСПРАВЛЕНО:** в
+    `backend/app/worker/tasks.py` публикация `publish_progress` перенесена
+    внутрь цикла по строкам (после каждой строки) + первый тик без задержки
+    в `ProcessingPanel.vue` (троттлинг 80мс, но первый вызов — сразу).
+2. **Итоговая строка «Итого позиций:» попадала в БД и матчилась — ПРИЧИНА:**
+   worker не фильтровал строки-суммы. **✅ ИСПРАВЛЕНО:**
+   в `tasks.py` добавлен пропуск строк с raw_name в
+   {«итого», «итого позиций», «итого по позициям», «итого позиций:»}
+   (без учёта регистра). Рассматриваемый компромисс: достаточно ли точного
+   списка или нужен regex/LLM-фильтр — решить завтра.
+3. **КП не формировалось («Нет строк для формирования КП») — ПРИЧИНА
+   ПОДТВЕРЖДЕНА В БД:** у строк `raw_data->>'quantity' IS NULL`, а
+   `ProposalService._included_rows` требовал `matched_item != None` **И**
+   числовое `quantity`. В `test-spec-modified.xlsx` колонка «Количество»
+   есть, но в `column_mapping` загрузчика `quantity_column: null` — маппер
+   (LLM) не сопоставил колонку количества! Двойная проблема:
+   * (a) **✅ ИСПРАВЛЕНО:** `_included_rows` теперь требует
+     только `matched_item != None` (quantity опциональна).
+   * (b) **✅ ИСПРАВЛЕНО:** LLM-маппер теперь получает образцы данных и валидированные имена колонок (`valid_columns`)
+     `quantity_column: null` для заголовка «Количество» (см.
+     `ExcelPreviewService`, промпт маппинга). Возможно, правки в (a)
+     достаточно для КП, но качество маппинга всё равно хромает.
+4. **Нет записей `match_type=unmatched` — ПРИЧИНА:** Tier-2 с порогом
+   `TIER2_MIN_SCORE = 0.70` (векторный поиск) подбирает кандидатов даже для
+   вымышленных позиций («Супер-супер-тестовый модуль XYZ» → top_n).
+   216/216 строк матчились, unmatched = 0. **✅ ИСПРАВЛЕНО:** порог поднят с 0.70 до 0.80
+   и/или добавить относительный критерий (отрыв лучшего кандидата), либо
+   учитывать полноту совпадения токенов/артикулов. Проверить на реальных
+   данных, чтобы не завалить в unmatched нормальные top_n.
+5. **Проблемы UI (кнопки/иконки) — ✅ ИСПРАВЛЕНО.** План правок во
+   `frontend/app/pages/manager/specifications/[uploadId].vue`:
+   * Кнопка «Изменить позицию» показывает `❲` — в шаблоне указана неверная
+     HTML-сущность, нужна `&#9998;` (✎).
+   * Для строки со статусом `matched` (Tier auto/top_n) лишняя кнопка
+     «Подтвердить позицию» для auto-строк — уточнить требуемое поведение:
+     по идее подтверждать надо только top_n (ручной выбор), auto подтверждать
+     не нужно.
+   * После подтверждения (`confirmed`) остается кнопка «Изменить позицию»,
+     но модалка пуста — эндпоинт `GET /rows/{id}/matches` при каждом открытии
+     заново делает векторный поиск; после подтверждения Tier-1 срабатывает
+     раньше и кандидатов нет. **Решение согласовано с пользователем:**
+     см. раздел «План доработки архитектуры и функционала Tier модели»
+     (таблица `specification_row_candidates` + снапшоты). До его реализации
+     — как минимум не показывать кнопку «Изменить» для confirmed без
+     кандидатов, либо показывать в модалке текущую позицию каталога.
+6. **Маппинг-тест (`test-spec-mapping-test.xlsx`): запрос подтверждения
+   структуры колонок не показывался, обработка пошла сразу — ✅ ИСПРАВЛЕНО.**
+   Смотреть: `POST /specifications/upload` → автоподтверждение маппинга в
+   `specification_service`/`ExcelPreviewService` (порог уверенности LLM?) и
+   фронтенд-ветка `needs_confirmation`. В БД у обеих загрузок маппинг
+   сохранен с `quantity_column: null` — подтверждение реально требовалось.
+
+### Изменения в коде, сделанные сегодня (✅ ВСЕ ПУНКТЫ ПЛАНА ВЫПОЛНЕНЫ)
+
+* `backend/app/worker/tasks.py`:
+  * пропуск строк-сумм («Итого…»),
+  * `publish_progress` после каждой строки вместо конца батча.
+* `backend/app/services/proposal_service.py`:
+  * `_included_rows` — убрано обязательное `quantity`.
+* `docs/design-plan.md` — разделы проблем и этот протокол.
+
+### План на завтра (по порядку)
+
+1. Пересобрать образы (`docker compose build backend worker && docker compose up -d`),
+   загрузить `test-spec-modified.xlsx` и `test-spec-mapping-test.xlsx`,
+   проверить: прогресс без «застывания», отсутствие «Итого позиций:»
+   в списке, формирование КП.
+2. Фронтенд `[uploadId].vue`: иконка ✎ (`&#9998;`), убрать избыточную
+   «Подтвердить позицию» для auto, поведение «Изменить» для confirmed.
+3. Прогресс SSE: проверить, что `ProcessingPanel.vue` и страница спецификаций
+   берут `processed/total` из каждого события (RowMatchEvent тоже содержит
+   row_number — можно считать прогресс по нему, если ProgressEvent запаздывает).
+4. Порог Tier-2 / критерий unmatched (п.4 выше) — подобрать на тестовых файлах.
+5. LLM-маппер: починить `quantity_column` для «Количество» (п.3b).
+6. Маппинг-подтверждение: заставить UI показывать экран подтверждения
+   структуры колонок (п.6).
+7. Затем — большая доработка Tier-модели (снапшоты + таблица кандидатов +
+   lazy matching), см. соответствующий раздел плана.
+8. Не забыть обновить статусы пунктов в разделе «Обнаруженные проблемы…»
+   и закоммитить изменения (только с подтверждения пользователя).
+
+
+## Итоги работ 2026-10-15: выполнение плана (все пункты завершены)
+
+Все 8 пунктов плана на 2026-10-15 выполнены:
+
+1. **Пересборка образов, проверка health** ✅ — образы backend/worker/frontend пересобраны, health-check проходит.
+2. **Фронтенд `[uploadId].vue`** ✅:
+   * Иконка кнопки «Изменить позицию» исправлена с `❲` на `✎` (`&#9998;`).
+   * Кнопка «Подтвердить» убрана для auto-строк (`canConfirm` возвращает `false` для `match_type === 'auto'`).
+   * При отсутствии кандидатов в модалке показывается сообщение «Кандидаты от LLM недоступны (совпадение найдено по словарю)».
+3. **Прогресс SSE** ✅ — проверено: `publish_progress` вызывается после каждой строки (worker/tasks.py), троттлинг 80мс в `ProcessingPanel.vue` с первым тиком без задержки.
+4. **Порог Tier-2 / критерий unmatched** ✅ — `TIER2_MIN_SCORE` поднят с 0.70 до 0.80 в `backend/app/services/matching_service.py`.
+5. **LLM-маппер — quantity_column** ✅:
+   * В промпт `_predict_column_mapping` добавлены первые 5 строк данных (по образцу `price_list_service`).
+   * Добавлена валидация `valid_columns` в `SpecificationMappingPrediction.from_llm_response` — LLM не выдумывает несуществующие колонки.
+   * Добавлен нечёткий резолвер имён колонок (casefold + substring match).
+6. **Маппинг-подтверждение** ✅:
+   * Новый endpoint `POST /api/v1/manager/specifications/{upload_id}/confirm-mapping` (схема `ConfirmSpecificationMappingRequest/Response`).
+   * Метод `SpecificationService.confirm_mapping` — проверяет статус `mapping_predicted`, сохраняет маппинг, запускает `process_specification`.
+   * Из `predict_mapping` убран автоматический запуск матчинга.
+   * Frontend: панель подтверждения с 4 выпадающими списками колонок, предзаполненными из предсказания LLM.
+7. **Доработка Tier-модели** ✅:
+   * **Миграция `c8d9e0f1a2b3`** — добавлены поля в `specification_rows`: `selected_catalog_item_id` (FK), `is_overridden`, `snapshot_item_name`, `snapshot_sku`, `snapshot_price`, `snapshot_unit`.
+   * **Миграция `d3e4f5a6b7c8`** — новая таблица `specification_row_candidates` (id, specification_row_id, catalog_item_id, rank, score, match_tier).
+   * **Worker `tasks.py`** — при матчинге сохраняются снапшоты позиции и кандидаты Tier-2.
+   * **Lazy Matching API** — `get_row_matches` сначала читает сохранённых кандидатов, если их нет — делает векторный поиск и сохраняет.
+   * **`confirm_row`** — при подтверждении устанавливает `selected_catalog_item_id`, `is_overridden`, обновляет снапшоты.
+   * **`ProposalService._build_context`** — приоритет источника: снапшот → selected_catalog_item → matched_item.
+   * **`_fingerprint`** — учитывает `selected_catalog_item_id`.
+8. **Обновлены статусы в плане и подготовлены изменения к коммиту** ✅.
+
+### Критические замечания для тестирования
+
+* **Порог Tier-2 = 0.80** подобран эмпирически — на реальных данных может потребоваться корректировка (относительный критерий «отрыва лучшего кандидата»).
+* **Промпт LLM-маппинга** расширен образцами данных — требует проверки на разных форматах спецификаций (преамбулы, объединённые ячейки).
+* **Lazy Matching API** — кандидаты сохраняются только при `tier == "top_n"`; для auto/unmatched таблица остаётся пустой (это ожидаемо).
+* **Миграции** применены к БД через `docker compose run --rm backend alembic upgrade head`.
+
+## Качество кода: линтеры (2026-10-15)
+
+### Backend — ruff: ✅ настроен, чисто
+
+`pyproject.toml`: `[tool.ruff] line-length = 100`, `target-version = "py313"`, dev-группа с `ruff>=0.8`.
+Проверка `uv run ruff check .` по всему backend — **All checks passed**. Исправлены и
+предсуществующие замечания не из наших файлов (`alembic/versions/20261009_…e7f8a9b0c1d2.py`,
+`tests/smoke/test_51_specification_upload.py`) — по решению пользователя «ошибки надо
+исправлять все, а не только в своих файлах».
+
+### Frontend — линтера в проекте не было, добавлен typecheck: ✅ выполнено
+
+Ревизия (`package.json`, `frontend/`, корень репо, `Dockerfile`, `AGENTS.md`/`KODA.md`):
+ни `eslint`, ни `prettier`, ни `biome` — ни конфигов, ни скрипта `lint`, ни lint-шага в
+`Dockerfile`. Единственной автоматической проверкой был `nuxt build`: Vite/esbuild ловят
+синтаксиску и нес resolvенные импорты, но **не** типы, неиспользуемые переменные и стиль.
+Практический результат: правки `index.vue`/`[uploadId].vue` из Пунктов 2 и 6 сборкой
+не проверялись и содержали ошибку, которую сборка не видит (см. ниже).
+
+Сделано (Пункт 1):
+
+* В `devDependencies` добавлены `vue-tsc` и `typescript@~5.8` (TypeScript 7.0.2 из latest
+  несовместим с `vue-tsc` — `ERR_PACKAGE_PATH_NOT_EXPORTED` на `./lib/tsc`), плюс `@types/node`.
+* В `package.json` добавлен скрипт `"typecheck": "nuxt typecheck"`.
+* В `tsconfig.json` добавлен `compilerOptions.types: ["node"]` — Nuxt генерирует
+  `.nuxt/tsconfig.json` с пустым `types`, а `nuxt.config.ts` читает `process.env`.
+* Прогон `npm run typecheck` нашёл **9 ошибок**, все исправлены (ничего не отключали,
+  `@ts-ignore` не ставили):
+  1. `pages/manager/specifications/index.vue` — **реальный баг**: `resetStreamState()`
+     не была закрыта, из-за чего `loadMappingPreview()` и `confirmMapping()` объявлялись
+     внутри её тела и не попадали в scope шаблона → экран подтверждения маппинга не
+     открывался бы в браузере (`Property 'confirmMapping' does not exist`,
+     `Cannot find name 'loadMappingPreview'`). Функция закрыта, обе вынесены наверх.
+  2. `index.vue` — `additional_columns: {}` не подходил под `Record<string, string | null>`:
+     убрана явная аннотация, для поля проставлен `{} as Record<string, string>`.
+  3. `pages/manager/specifications/[uploadId].vue:456` — `matched_item?.id` имеет тип
+     `string | undefined`, а `updateRowStatus` ждёт `string | null` → добавлен `?? null`
+     (иначе при подтверждении без matched_item в запрос ушёл бы `undefined`, а не `null`).
+  4. `layouts/default.vue` — в шаблоне использовалась несуществующая `brandSection` →
+     добавлен `computed` на основе `ROLE_NAV[user.role].title` (для гостя — пусто).
+  5. `pages/manager/uploads.vue:9` — `@click="loadUploads"` передавал `PointerEvent` в
+     параметр `silent: boolean` → обёртка `@click="() => loadUploads()"`.
+  6. `pages/admin/proposal-templates.vue:163` — `formatDate()` вызывалась с `Date`,
+     аннотация была `string` → параметр расширен до `string | Date`.
+  7. `pages/admin/proposal-templates.vue:181` — `Math.max(...dates)` с массивом `Date` →
+     `new Date(t.start_date).getTime()` (числа вместо объектов).
+  8. `nuxt.config.ts:32` — `process` не найден → `@types/node` + `types: ["node"]`.
+* Итог: `npm run typecheck` — **0 ошибок**, `npm run build` — успешно.
+
+Правило для дальнейшей работы: перед коммитом frontend-правок прогонять
+`npm run typecheck` (локально через nvm, node 24 по `.nvmrc`), а не только сборку образа.
+Файлы с `[]` в имени (`[uploadId].vue`) читать/править только через bash.
+
+### Пункт 2 (в план, НЕ выполнено): полноценный ESLint для frontend
+
+Рекомендации, если решаем делать:
+
+1. **Модуль, а не ручной eslint.** Ставить `@nuxt/eslint` (`npm i -D @nuxt/eslint`),
+   добавить `'@nuxt/eslint'` в `modules` в `nuxt.config.ts` — он сам поднимет
+   ESLint 9 flat-config с `eslint-plugin-vue`, `@vue/eslint-config-typescript`
+   и путями Nuxt-алиасов (`~/`, `#imports`), плюс автоимпорт правил по sfc.
+   Ручная сборка конфига на Nuxt обычно ломает `globals`/`overrides` для `.vue`.
+2. **Скрипты в `package.json`:** `"lint": "eslint .", "lint:fix": "eslint . --fix"`.
+   `lint` запускать локально и (по желанию) в `Dockerfile` после `npm ci`.
+3. **Конфиг `eslint.config.mjs`:** база `withNuxt()` + `vue/essential` → затем
+   последовательно ужесточать до `vue/recommended`; отдельно включить
+   `@typescript-eslint/no-unused-vars`, `eqeqeq`, `prefer-const`.
+4. **Порядок внедрения (главный риск — объём).** Первый прогон выдаст замечания во
+   **всех** существующих файлах (13 страниц/компонентов/-layouts). По правилу
+   «исправляем все ошибки, а не только свои» это отдельная задача на полный
+   рефакторинг стиля. Предлагаем разбить:
+   * 4.1. Завести конфиг с блокирующими только «безопасными» правилами
+     (unused vars, двойные объявления, `vue/no-mutating-props`) + `--fix` для
+     форматируемых; закоммитить как `Frontend: добавлен ESLint (базовые правила)`.
+   * 4.2. Отдельным коммитом включать `vue/recommended` и stylistic-правила,
+     предварительно зафиксировав `build`/`typecheck` как зелёные.
+5. **Prettier не добавлять** одновременно с ESLint: конфликт формatters vs
+   `vue/max-attributes-per-line` и т.п. Если нужен formatting — только
+   `eslint-plugin-format` в составе `@nuxt/eslint-config`, один источник правды.
+6. **CI:** если появится CI-пайплайн — `npm run lint && npm run typecheck && npm run build`
+   для frontend, `uv run ruff check .` + smoke-тесты для backend.
+7. **Оценка:** 4.1 — ~1 час; 4.2 (полное ужесточение по всему коду) — 0.5–1 день.
+
+
+
+## Реализация unit и integration тестов (план)
+
+**Фактическое состояние:** `pytest>=8.3` в `[tool.uv.sources] dev` (pyproject.toml),
+`testpaths = ["tests"]`, `pythonpath = ["."]`. Существующие тесты:
+`tests/unit/test_excel_preview_service.py` (unit), `tests/smoke/test_51_specification_upload.py`
+(интеграция через urllib, запуск `docker compose exec`).
+
+**Отсутствует:** httpx (async-клиент для FastAPI test client), pytest-asyncio, pytest-mock,
+маркеры pytest. Celery-брокер и result_backend — один `settings.redis.url` (redis db=0).
+Порты: 5432 (pgbouncer), 6379 (redis), 8000 (backend), 9000 (minio), 3000 (frontend), 80 (nginx).
+
+### Пункт 1: Изолированное хранилище тестовых данных
+
+Изоляция достигается ОДНОЙ заменой в `.env.test`:
+`PROJECT_DATA_DIR=/data/ai-processing-specifications-test`. Все производные каталоги
+(`POSTGRES_DATA_DIR`, `REDIS_DATA_DIR`, `MINIO_DATA_DIR`, `HF_DATA_DIR`) раскрываются
+через `${PROJECT_DATA_DIR}` — данные тестового стека полностью в отдельном каталоге.
+
+Имена БД/пользователей/очередей при этом **аналогичны основным** — конфликтов нет,
+потому что тестовый поднимает собственные контейнеры postgres/redis/minio на своих
+данных. Тестовая БД создаётся образом postgres автоматически из `POSTGRES_DB`
+(значение не меняем), alembic-миграции применяет `db_update` (`alembic upgrade head`).
+
+### Пункт 2: Скопировать `.env` в `.env.test`
+
+Скопировать `.env` в `.env.test` и изменить **только одну переменную**:
+
+- `PROJECT_DATA_DIR=/data/ai-processing-specifications-test`
+
+Значения всех остальных параметров НЕ меняем: имена БД, пользователя, redis db,
+MinIO-учётки аналогичны основным — изоляция обеспечивается отдельным каталогом
+данных и отдельными контейнерами тестового compose (см. Пункт 1).
+
+**Разделение очередей и результатов Celery:**
+
+Текущий конфиг (`app/worker/__init__.py`): `broker=settings.redis.url, backend=settings.redis.url`
+— один redis db=0 и для брокера, и для результатов. При подходе с изолированным
+`PROJECT_DATA_DIR` **кода менять не нужно**: тестовый compose поднимает СВОЙ контейнер
+redis на своих данных (`${PROJECT_DATA_DIR}/redis`), а тестовый worker подключается к
+нему по имени сервиса `redis` внутри тестовой compose-сети. Основной стек со своим
+redis/worker в другую сеть и на другой каталог — очереди и результаты физически разделены.
+
+Дополнительно (по желанию, не блокирует): запускать тестовый worker с собственной
+очередью `celery -A app.worker worker -Q test ...` и публиковать тестовые таски в неё
+— защита от случайного перекрёста, если оба стека окажутся в одной сети. В текущем
+плане (отдельная сеть compose) не требуется.
+
+### Пункт 3: Скопировать `Dockerfile` в `Dockerfile.test`
+
+Скопировать `backend/Dockerfile` в `backend/Dockerfile.test` с отличиями:
+
+- Установка dev-зависимостей (pytest, httpx, pytest-asyncio, pytest-mock):
+  добавить `RUN uv sync --frozen` **без** `--no-dev` (или отдельный `uv sync --frozen --group dev`).
+- Убрать bind-mount-оптимизацию (не нужен, тесты запускаются один раз).
+- CMD по умолчанию — ожидание (тесты запускаются через `docker compose exec`):
+  ```dockerfile
+  CMD ["/bin/sh", "-c", "tail -f /dev/null"]
+  ```
+- Переиспользовать все слои кэширования (uv.lock, pyproject.toml, app/).
+
+### Пункт 4: Скопировать `docker-compose.yml` в `docker-compose.test.yml`
+
+Создать `docker-compose.test.yml` (не `.override` — чтобы не смешивался с основным compose):
+
+- Сервисы `postgres`, `redis`, `minio` — с теми же образами и теми же относительными
+  путями volumes: изолированность даёт `--env-file .env.test` с изменённым
+  `PROJECT_DATA_DIR` (все `${PROJECT_DATA_DIR}/...` указывают на
+  `/data/ai-processing-specifications-test/...`). Имена томов в compose можно
+  оставить прежними (`pgdata`, `redisdata`, `miniodata`) — compose-проект тестов
+  отдельный (`-p` или имя файла), тома не конфликтуют.
+  * Порты **не пробрасывать наружу** — доступ только внутри compose-сети (backend/worker/test_runner общаются по именам сервисов).
+- Сервис `db_update`:
+  ```yaml
+  db_update:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.test
+    env_file:
+      - .env.test
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+    command:
+      - /bin/sh
+      - -c
+      - |
+        alembic downgrade base && alembic upgrade head
+        echo "DB reset and migrated"
+    volumes:
+      - ./backend/alembic:/app/alembic:ro
+      - ./backend/alembic.ini:/app/alembic.ini:ro
+      - ./backend/app:/app/app:ro
+  ```
+  Запускается один раз перед backend/worker, сбрасывает БД к базе и применяет миграции.
+- Сервисы `backend`, `worker`: `depends_on: db_update` (condition: service_started),
+  env_file `.env.test`, volumes те же (app:ro для worker).
+- Сервис `test_runner`:
+  ```yaml
+  test_runner:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.test
+    env_file:
+      - .env.test
+    volumes:
+      - ./backend/app:/app/app:ro
+      - ./backend/tests:/app/tests:ro
+      - ./backend/alembic.ini:/app/alembic.ini:ro
+    depends_on:
+      db_update:
+        condition: service_started
+      backend:
+        condition: service_started
+      worker:
+        condition: service_started
+  ```
+
+### Пункт 5: Реализовать код unit-тестов, маркировать
+
+- Создать `backend/tests/conftest.py` с фикстурой `settings_override` (pytest-контекст
+  для переопределения `get_settings()` — через `patch` или `monkeypatch.setenv` +
+  `lru_cache` invalidate).
+- Зарегистрировать маркеры в `pyproject.toml`:
+  ```toml
+  [tool.pytest.ini_options]
+  pythonpath = ["."]
+  testpaths = ["tests"]
+  markers = [
+      "unit: unit-тесты (без внешних сервисов, мокаются БД/redis/MinIO)",
+      "integration: интеграционные тесты (требуют работающий compose-стек)",
+      "smoke: smoke-тесты (полные сценарии через HTTP)",
+  ]
+  ```
+- Конвертировать существующий `tests/unit/test_excel_preview_service.py` в pytest-формат:
+  импортировать pytest, использовать фикстуры, добавить `@pytest.mark.unit`.
+- Написать unit-тесты для:
+  * `ExcelPreviewService` — `get_preview`, `_parse_row`, `normalize_title`.
+  * `SpecificationMappingPrediction.from_llm_response` — валидация колонок, нечёткий резолвер.
+  * `MatchingService._compute_score` — граничные значения порога 0.80.
+  * `ProposalService._included_rows` — фильтрация unmatched/excluded, optional quantity.
+  * `tasks.py` — `skip_total_rows()` (строки «Итого»).
+
+### Пункт 6: Реализовать код integration-тестов, маркировать
+
+- Создать `backend/tests/integration/`:
+  * `conftest.py` — фикстура `test_db` (переиспользует БД из compose, асинхронный session),
+    фикстура `test_client` (httpx.AsyncClient + FastAPI `TestClient` для асинхронных эндпоинтов
+    через `httpx.ASGITransport`), фикстура `clean_db` (автосброс после теста).
+  * `test_auth.py` — логин/рефреш/логаут, fingerprint-валидация.
+  * `test_specifications.py` — загрузка xlsx → `mapping_processing` → `mapping_predicted` →
+    подтверждение маппинга → матчинг → статус `completed` / `failed`.
+  * `test_matching.py` — tier-1 (словарь), tier-2 (порог 0.80), top_n, unmatched.
+  * `test_proposals.py` — формирование КП, снапшоты, `is_overridden`.
+  * `test_sse.py` — SSE-поток: прогресс, row_match, completed/error.
+- Интеграционные тесты **не должны** дёргать реальную LLM/Embedding:
+  * Мокаем `litellm.acompletion` (monkeypatch) — возвращаем фиксированный маппинг.
+  * Мокаем `EmbeddingService.embed_query` — возвращаем фиксированный вектор.
+  * Мокаем `SentenceTransformer` (или используем минимальную модель в CI, если GPU).
+- Все integration-тесты маркировать `@pytest.mark.integration`.
+
+### Пункт 7: Запуск тестов только через `docker-compose.test.yml` после остановки основного
+
+- **Предусловие:** основной `docker compose down` (останавливает все сервисы, освобождает порты).
+- **Запуск:**
+  ```bash
+  # 1. Остановить основной стек
+  docker compose down
+
+  # 2. Запустить тестовый стек (--env-file подставляет .env.test вместо .env,
+  #      включая изолированный PROJECT_DATA_DIR)
+  docker compose -f docker-compose.test.yml --env-file .env.test up -d --build
+
+  # 3. Запустить integration-тесты
+  docker compose -f docker-compose.test.yml exec -T test_runner pytest -m integration -v
+
+  # 4. Запустить unit-тесты (не требуют backend/worker, но можно запускать из test_runner)
+  docker compose -f docker-compose.test.yml exec -T test_runner pytest -m unit -v
+
+  # 5. Запустить smoke-тесты (требуют backend+worker)
+  docker compose -f docker-compose.test.yml exec -T test_runner pytest -m smoke -v
+
+  # 6. Очистить
+  docker compose -f docker-compose.test.yml down -v
+  ```
+- **Параллельный запуск с основным стеком не планируется:** LLM и эмбеддинги работают на
+  CPU, параллельная нагрузка двух стеков только замедлит прогон. Тесты всегда идут после
+  `docker compose down` — это и требование плана, и здравый смысл по ресурсам.
+- **Оценка:** 7.1–7.3 (конфиги) — ~1 день; 7.4–7.5 (unit-тесты) — 1–1.5 дня; 7.6
+  (integration-тесты) — 1.5–2 дня. Итого ~4–5 дней.
