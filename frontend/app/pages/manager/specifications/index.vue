@@ -43,6 +43,51 @@
       {{ uploadError }}
     </div>
 
+    <!-- Панель подтверждения маппинга колонок -->
+    <div v-if="showMappingConfirm" class="mapping-confirm-panel">
+      <h3>Подтвердите маппинг колонок</h3>
+      <p class="text-muted text-sm mb-4">
+        LLM предсказал роли колонок. Проверьте и при необходимости отредактируйте перед началом обработки.
+      </p>
+
+      <div class="mapping-form">
+        <div class="form-group">
+          <label>Наименование товара (обязательно)</label>
+          <select v-model="mappingForm.name_column" class="form-control">
+            <option value="">— Выберите колонку —</option>
+            <option v-for="col in mappingHeaders" :key="col" :value="col">{{ col }}</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Количество</label>
+          <select v-model="mappingForm.quantity_column" class="form-control">
+            <option value="">— Нет —</option>
+            <option v-for="col in mappingHeaders" :key="col" :value="col">{{ col }}</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Единица измерения</label>
+          <select v-model="mappingForm.unit_column" class="form-control">
+            <option value="">— Нет —</option>
+            <option v-for="col in mappingHeaders" :key="col" :value="col">{{ col }}</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Цена</label>
+          <select v-model="mappingForm.price_column" class="form-control">
+            <option value="">— Нет —</option>
+            <option v-for="col in mappingHeaders" :key="col" :value="col">{{ col }}</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-actions mt-4">
+        <button class="btn-action" :disabled="!mappingForm.name_column || confirmingMapping" @click="confirmMapping">
+          {{ confirmingMapping ? 'Подтверждение…' : 'Подтвердить и начать обработку' }}
+        </button>
+      </div>
+    </div>
+
     <!-- Панель обработки: имя файла + SSE-визуализация + кнопка к результатам -->
     <CommonProcessingPanel
       v-if="processing"
@@ -132,6 +177,21 @@ const isUploading = ref(false)
 const clients = ref<Client[]>([])
 const selectedClientId = ref('')
 
+// Состояние подтверждения маппинга колонок
+const showMappingConfirm = ref(false)
+/** После подтверждения формы игнорируем повторные события mapping_predicted (переигрывание буфера). */
+const mappingConfirmed = ref(false)
+const confirmingMapping = ref(false)
+const mappingHeaders = ref<string[]>([])
+const mappingUploadId = ref('')
+const mappingForm = ref({
+  name_column: '',
+  quantity_column: '',
+  unit_column: '',
+  price_column: '',
+})
+
+// Состояние панели обработки (проблемы 1–3)
 // Состояние панели обработки (проблемы 1–3)
 const processing = ref(false)
 const processingFileName = ref('')
@@ -222,10 +282,11 @@ function handleStreamEvent(data: SseStreamEvent) {
     return
   }
 
-  // Статус LLM-маппинга колонок: числового прогресса нет
-  if (status === 'error') {
-    streamState.phase = 'error'
-    streamState.errorMessage = String(data.message ?? '')
+  // Статус LLM-маппинга колонок: показываем экран подтверждения
+  if (status === 'mapping_predicted') {
+    mappingUploadId.value = String(data.upload_id ?? '')
+    loadMappingPreview()
+    return
   }
 }
 
@@ -312,6 +373,66 @@ function resetStreamState() {
   streamState.log = []
 }
 
+/**
+ * Загрузить предпросмотр маппинга: полный список колонок файла + предсказание LLM.
+ *
+ * Отдельный GET, а не данные из SSE: событие mapping_predicted несёт только статус,
+ * а переигрывание буфера при реконнекте не должно повторно показывать форму
+ * после подтверждения (флаг mappingConfirmed).
+ */
+async function loadMappingPreview() {
+  if (mappingConfirmed.value) return
+  try {
+    const preview = await $api(`/manager/specifications/${mappingUploadId.value}/mapping-preview`)
+    mappingHeaders.value = preview.headers || []
+    const m = preview.mapping || {}
+    mappingForm.value = {
+      name_column: m.name_column ?? '',
+      quantity_column: m.quantity_column ?? '',
+      unit_column: m.unit_column ?? '',
+      price_column: m.price_column ?? '',
+    }
+    showMappingConfirm.value = true
+    // Матчинг ещё не запущен: панель обработки скрываем, поток до подтверждения не нужен
+    processing.value = false
+    stopStream()
+  } catch (err: any) {
+    toast.fromError(err, 'Не удалось загрузить предпросмотр маппинга')
+  }
+}
+
+/** Подтвердить маппинг и запустить обработку. */
+async function confirmMapping() {
+  if (!mappingForm.value.name_column) {
+    toast.error('Выберите колонку с наименованием товара')
+    return
+  }
+  confirmingMapping.value = true
+  try {
+    const body = {
+      name_column: mappingForm.value.name_column,
+      quantity_column: mappingForm.value.quantity_column || null,
+      unit_column: mappingForm.value.unit_column || null,
+      price_column: mappingForm.value.price_column || null,
+      additional_columns: {} as Record<string, string>,
+    }
+    await $api(`/manager/specifications/${mappingUploadId.value}/confirm-mapping`, {
+      method: 'POST',
+      body,
+    })
+    showMappingConfirm.value = false
+    mappingConfirmed.value = true
+    // Открыть панель обработки и подписаться на SSE
+    resetStreamState()
+    processing.value = true
+    openStream(mappingUploadId.value)
+  } catch (err: any) {
+    toast.fromError(err, 'Не удалось подтвердить маппинг')
+  } finally {
+    confirmingMapping.value = false
+  }
+}
+
 async function handleFileSelect(event: Event) {
   const target = event.target as HTMLInputElement
   const file = target.files?.[0]
@@ -331,8 +452,11 @@ async function handleFileSelect(event: Event) {
       body: formData,
     })
 
-    // Успех: отдельного тоста нет — сразу открываем панель и подписываемся на SSE
+    // Успех: отдельного тоста нет — панель обработки открыта сразу (SSE-индикатор
+    // активен на этапе LLM-маппинга), экран подтверждения сменит её по событию
+    // mapping_predicted; матчинг начнётся после подтверждения
     resetStreamState()
+    mappingConfirmed.value = false
     processingFileName.value = file.name
     processingUploadId.value = response.upload_id
     processing.value = true
@@ -389,4 +513,28 @@ async function handleFileSelect(event: Event) {
   max-height: 90vh;
   overflow-y: auto;
 }
+.mapping-confirm-panel {
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  padding: 24px;
+  margin-top: 20px;
+  background: var(--app-surface);
+}
+
+.mapping-confirm-panel h3 {
+  margin-top: 0;
+}
+
+.mapping-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 600px) {
+  .mapping-form {
+    grid-template-columns: 1fr;
+  }
+}
+
 </style>

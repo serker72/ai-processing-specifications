@@ -1,3 +1,8 @@
 {
-  "extends": "./.nuxt/tsconfig.json"
+  "extends": "./.nuxt/tsconfig.json",
+  "compilerOptions": {
+    // Nuxt генерирует types: [] (автоподключение @types отключено), а nuxt.config.ts
+    // читает process.env — подключаем только node-типы, остальное как раньше.
+    "types": ["node"]
+  }
 }

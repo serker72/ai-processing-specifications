@@ -46,10 +46,14 @@
  * layout workspace с панелью навигации, поэтому сюда гость попадает только на
  * /login (авторизованного auth-guard ведёт в его кабинет).
  */
+import { computed } from 'vue'
 import { useAuth } from '~/composables/useAuth'
-import { BRAND_NAME } from '~/composables/useNavMenu'
+import { BRAND_NAME, ROLE_NAV } from '~/composables/useNavMenu'
 
 const { user, logout } = useAuth()
+
+/** Подпись раздела в шапке: для гостя (нет роли) — пусто, для пользователя — название кабинета. */
+const brandSection = computed(() => (user.value ? (ROLE_NAV[user.value.role]?.title ?? '') : ''))
 
 async function handleLogout() {
   await logout()

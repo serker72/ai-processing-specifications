@@ -177,11 +177,11 @@ const isFormValid = computed(() => {
 
 function getMaxExistingDate() {
   if (!templates.value.length) return null
-  const dates = templates.value.map(t => new Date(t.start_date))
+  const dates = templates.value.map(t => new Date(t.start_date).getTime())
   return new Date(Math.max(...dates))
 }
 
-function formatDate(dateStr: string) {
+function formatDate(dateStr: string | Date) {
   return new Date(dateStr).toLocaleDateString('ru-RU')
 }
 

@@ -130,7 +130,7 @@
                 title="Изменить позицию"
                 @click="openConfirmDialog(row)"
               >
-                &#10098;
+                &#9998;
               </button>
               <!-- Кнопка «Исключить» — доступна если статус не excluded и не confirmed -->
               <button
@@ -201,6 +201,10 @@
       </div>
 
       <!-- Кандидаты из векторного поиска -->
+      <p v-if="!candidates.length && dialogRow?.matched_item" class="text-muted text-sm mb-4">
+        Кандидаты от LLM недоступны (совпадение найдено по словарю).
+        Подтвердите текущую позицию или дождитесь обновления кандидатов.
+      </p>
       <div v-if="candidates.length" class="mb-4">
         <h4>Кандидаты (ТОП-{{ candidates.length }}):</h4>
         <table class="data-table">
@@ -422,6 +426,8 @@ async function loadRows(p: number) {
 }
 
 function canConfirm(row: SpecificationRowItem) {
+  // Auto-строки уже подтверждены системой — подтверждать нужно только top_n
+  if (row.match_type === "auto") return false
   return row.status !== 'excluded' && row.status !== 'confirmed' && row.matched_item !== null
 }
 
@@ -447,7 +453,7 @@ async function openConfirmDialog(row: SpecificationRowItem) {
 
 async function confirmWithExisting() {
   if (!dialogRow.value) return
-  await updateRowStatus(dialogRow.value.id, 'confirmed', dialogRow.value.matched_item?.id)
+  await updateRowStatus(dialogRow.value.id, 'confirmed', dialogRow.value.matched_item?.id ?? null)
 }
 
 async function confirmWithCandidate(candidate: RowMatchCandidate) {

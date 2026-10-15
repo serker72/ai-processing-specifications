@@ -6,7 +6,7 @@
       <NuxtLink to="/manager/specifications" class="btn-action btn-link">
         Загрузить спецификацию
       </NuxtLink>
-      <button class="btn-secondary" :disabled="isLoading" @click="loadUploads">
+      <button class="btn-secondary" :disabled="isLoading" @click="() => loadUploads()">
         {{ isLoading ? 'Обновление...' : 'Обновить' }}
       </button>
     </div>
