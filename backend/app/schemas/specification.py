@@ -1,6 +1,5 @@
 """Pydantic-схемы для предсказания маппинга колонок спецификации (Модуль 5)."""
 
-import re
 from datetime import datetime
 from typing import Literal
 
@@ -22,44 +21,48 @@ class SpecificationMappingPrediction(BaseModel):
     ) -> "SpecificationMappingPrediction":
         """Создать объект из ответа LLM с валидацией имён колонок.
 
-        Если LLM вернул имя, которого нет в файле — заменяет на ближайший
-        вариант из `valid_columns` (по вхождению подстроки) или `None`.
+        Имена возвращаются СТРОГО как в заголовках файла: LLM часто отдаёт их в
+        другом регистре/с лишними пробелами, а frontend сопоставляет значения со
+        списком `<option>` по точному совпадению — иначе селекты пустые.
+
+        Если LLM вернул имя, которого нет в файле — берётся ближайший вариант из
+        `valid_columns` (по вхождению подстроки) или `None`.
         """
-
-        @staticmethod
-        def _resolve(value: str | None, valid: set[str] | None) -> str | None:
-            if not value:
-                return None
-            if valid is not None and value in valid:
-                return value
-            if valid is not None:
-                # Попытка найти по нечёткому вхождению (casefold, без лишних пробелов)
-                normalized = re.sub(r"\s+", " ", value).casefold()
-                for candidate in valid:
-                    if normalized in re.sub(r"\s+", " ", candidate).casefold():
-                        return candidate
-            return None
-
         from app.services.excel_preview_service import ExcelPreviewService
 
-        # Нормализованные ключи для сравнения
-        norm_valid: set[str] | None = None
-        if valid_columns:
-            norm_valid = {
-                ExcelPreviewService.normalize_title(c) for c in valid_columns
-            }
+        # нормализованное имя -> оригинальный заголовок из файла
+        by_norm: dict[str, str] = (
+            {ExcelPreviewService.normalize_title(c): c for c in valid_columns}
+            if valid_columns
+            else {}
+        )
 
-        name_col = _resolve(response.get("name_column"), norm_valid) or ""
-        quantity_col = _resolve(response.get("quantity_column"), norm_valid)
-        unit_col = _resolve(response.get("unit_column"), norm_valid)
-        price_col = _resolve(response.get("price_column"), norm_valid)
+        def resolve(value: object) -> str | None:
+            if not isinstance(value, str) or not value.strip():
+                return None
+            if not by_norm:
+                return value
+            normalized = ExcelPreviewService.normalize_title(value)
+            exact = by_norm.get(normalized)
+            if exact is not None:
+                return exact
+            # Нечёткое совпадение: LLM вернул часть заголовка или добавил текст
+            for norm, original in by_norm.items():
+                if normalized in norm or norm in normalized:
+                    return original
+            return None
+
+        name_col = resolve(response.get("name_column")) or ""
+        quantity_col = resolve(response.get("quantity_column"))
+        unit_col = resolve(response.get("unit_column"))
+        price_col = resolve(response.get("price_column"))
 
         additional: dict[str, str] = {}
         for key, value in response.items():
             if key in ("name_column", "quantity_column", "unit_column", "price_column"):
                 continue
             if isinstance(value, str):
-                resolved = _resolve(value, norm_valid)
+                resolved = resolve(value)
                 if resolved is not None:
                     additional[key] = resolved
 

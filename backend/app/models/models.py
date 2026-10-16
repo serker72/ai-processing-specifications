@@ -230,8 +230,15 @@ class SpecificationRow(Base):
     )
 
     upload: Mapped[SpecificationUpload] = relationship()
-    matched_item: Mapped[CatalogItem | None] = relationship()
-    selected_catalog_item: Mapped[CatalogItem | None] = relationship()
+    # Два FK на catalog_items (matched_item_id, selected_catalog_item_id) —
+    # для каждой связи явно указываем свой foreign_keys, иначе SQLAlchemy не
+    # может выбрать путь join.
+    matched_item: Mapped[CatalogItem | None] = relationship(
+        foreign_keys=[matched_item_id]
+    )
+    selected_catalog_item: Mapped[CatalogItem | None] = relationship(
+        foreign_keys=[selected_catalog_item_id]
+    )
     candidates: Mapped[list["SpecificationRowCandidate"]] = relationship(
         back_populates="specification_row", cascade="all, delete-orphan"
     )
