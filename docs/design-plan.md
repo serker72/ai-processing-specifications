@@ -772,8 +772,8 @@
   * `backend/scripts/entrypoint.sh`: экспорт при старте контейнера, затем `exec "$@"`; Dockerfile: `ENTRYPOINT` + `ARG WORKER_CUDA_VISIBLE_DEVICES` (пусто — CPU torch из uv.lock, непусто — доустановка CUDA-сборки torch cu124), флаг `IS_INTEL_CPU` пишется в `/app/.env_build` при сборке на x86_64/GenuineIntel;
   * `EmbeddingService._load_model()`: cuda → PyTorch GPU; cpu → OpenVINO/ONNX из `EMBEDDING_MODEL_CACHE_DIR` (по файлам `openvino*.xml` / `*.onnx`), иначе PyTorch CPU. Сигнатуры `embed_query`/`embed_passages` не менялись;
   * `docker-compose.yml`: `build.args.WORKER_CUDA_VISIBLE_DEVICES`, env `EMBEDDING_MODEL_CACHE_DIR` для backend/worker, bind-volume `modelcache` на `${EMBEDDING_MODEL_CACHE_DIR}`;
-  * `.env.example`: `EMBEDDING_MODEL_CACHE_DIR="${PROJECT_DATA_DIR}/models"`, `WORKER_CUDA_VISIBLE_DEVICES=`.
-  * ⚠️ Не реализовано: `deploy.resources.reservations.devices` (проброс nvidia) — добавляется на GPU-сервере по месту, в базовом compose не включён (CPU-хост).
+  * `.env.example`: `EMBEDDING_MODEL_CACHE_DIR="${PROJECT_DATA_DIR}/models"`, `WORKER_CUDA_VISIBLE_DEVICES=`, комментарий-инструкция по GPU-запуску;
+  * `docker-compose.gpu.yml` — GPU-override: `deploy.resources.reservations.devices` (driver nvidia) для backend и worker + `EMBEDDING_DEVICE=cuda`; не подключается к базовому compose (на CPU-хосте такая секция блокирует запуск), запуск: `docker compose -f docker-compose.yml -f docker-compose.gpu.yml --env-file .env.gpu up -d` (после пересборки образа с CUDA-torch).
 
 
 ## Обнаруженные проблемы (ручное тестирование test-spec-modified.xlsx, 2026-10-13)

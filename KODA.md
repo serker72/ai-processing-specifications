@@ -17,6 +17,7 @@ ai-processing-specifications/
 │   └── pgbouncer/        # pgbouncer.env
 ├── .koda/skills/         # Скиллы Koda
 ├── docker-compose.yml    # postgres (pgvector), pgbouncer, redis, minio, backend, worker, frontend, nginx
+├── docker-compose.gpu.yml # GPU-override: проброс NVIDIA (deploy.resources...devices) для backend/worker
 ├── .env / .env.example   # Переменные окружения compose (example — шаблон)
 ├── README.md             # Назначение системы и Tier-модель матчинга
 ├── AGENTS.md             # Краткие правила для контрибьюторов и AI-агентов
