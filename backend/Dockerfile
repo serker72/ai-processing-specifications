@@ -30,14 +30,14 @@ COPY pyproject.toml uv.lock ./
 # Venv вне /app, чтобы bind-mount исходников его не затирал
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv
 
-# Базовая установка (CPU torch из uv.lock)
-RUN uv sync --frozen --no-dev --no-install-project
+# Базовая установка (CPU torch из uv.lock) + extras группы intel (openvino,
+# optimum-intel) — нужны для OpenVINO-экспорта и инференса на CPU.
+RUN uv sync --frozen --no-dev --no-install-project --extra intel
 
 # Если передан WORKER_CUDA_VISIBLE_DEVICES — заменяем torch на CUDA-сборку
 RUN if [ -n "${WORKER_CUDA_VISIBLE_DEVICES}" ]; then \
       uv pip install --python /opt/venv/bin/python \
         --index-url https://download.pytorch.org/whl/cu124 \
-        --break-system-packages \
         torch; \
     fi
 
