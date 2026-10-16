@@ -748,7 +748,7 @@
 3. **Создание скрипта экспорта (`backend/scripts/export_model.sh`).**
    * Считать переменные из /app/.env_build.
    * Добавить проверку: если в окружении задана GPU (DEVICE=cuda или аналоги), пропускать экспорт за ненадобностью (так как GPU работает через нативный PyTorch).
-   * Для CPU выполнять условный экспорт через optimum-cli в формат OpenVINO (если IS_INTEL_CPU=true) или ONNX (для остальных CPU) в папку MODEL_CACHE_DIR (с поведением Fail-Fast при ошибках).
+   * Для CPU выполнять условный экспорт через optimum-cli в формат OpenVINO (если IS_INTEL_CPU=true) или ONNX (для остальных CPU) в папку EMBEDDING_MODEL_CACHE_DIR (с поведением Fail-Fast при ошибках).
 
 4. **Создание Entrypoint-обертки (`backend/scripts/entrypoint.sh`).**
    * Вызывать export_model.sh при старте контейнера.
@@ -757,13 +757,23 @@
 5. **Обновление `EmbeddingService` (`backend/app/services/embedding_service.py`).**
    * Обновить логику свойства model для реализации ветвления:
      * Если устройство (device) содержит cuda — инициализировать стандартный SentenceTransformer с бэкендом PyTorch на GPU.
-     * Если устройство cpu — проверить наличие оптимизированных файлов (model.onnx или openvino_model.xml) в MODEL_CACHE_DIR и загрузить SentenceTransformer из этой папки.
+     * Если устройство cpu — проверить наличие оптимизированных файлов (model.onnx или openvino_model.xml) в EMBEDDING_MODEL_CACHE_DIR и загрузить SentenceTransformer из этой папки.
      * Оставить сигнатуры методов кодирования (embed_query, embed_passages) без изменений.
 
 6. **Настройка окружения (`docker-compose.yml`).**
    * Добавить секцию build.args с параметром WORKER_CUDA_VISIBLE_DEVICES (для GPU-серверов) и настроить переменную окружения EMBEDDING__DEVICE (cuda или cpu).
    * Для GPU-контейнеров добавить конфигурацию deploy.resources.reservations.devices с пробросом драйвера nvidia.
-   * Добавить переменные `MODEL_CACHE_DIR` и `HF_HOME` для воркеров и бэкенда.
+   * Добавить переменные `EMBEDDING_MODEL_CACHE_DIR` и `HF_HOME` для воркеров и бэкенда.
+
+* **✅ Реализация (2026-10-16):**
+  * `pyproject.toml`: `optimum[onnxruntime]>=1.20` — основная зависимость; опциональная группа `intel` (`optimum-intel`, `openvino`) для доустановки;
+  * `config.py`: `EmbeddingSettings.model_cache_dir` (`EMBEDDING_MODEL_CACHE_DIR`, пусто = выключено);
+  * `backend/scripts/export_model.sh`: fail-fast экспорт через `optimum-cli` (OpenVINO при IS_INTEL_CPU=true и доступном openvino, иначе ONNX); пропуск при `EMBEDDING_DEVICE=cuda` и при уже экспортированной модели; в каталог копируются метаданные HF-снапшота (токенизер/конфиг) + экспортированная модель;
+  * `backend/scripts/entrypoint.sh`: экспорт при старте контейнера, затем `exec "$@"`; Dockerfile: `ENTRYPOINT` + `ARG WORKER_CUDA_VISIBLE_DEVICES` (пусто — CPU torch из uv.lock, непусто — доустановка CUDA-сборки torch cu124), флаг `IS_INTEL_CPU` пишется в `/app/.env_build` при сборке на x86_64/GenuineIntel;
+  * `EmbeddingService._load_model()`: cuda → PyTorch GPU; cpu → OpenVINO/ONNX из `EMBEDDING_MODEL_CACHE_DIR` (по файлам `openvino*.xml` / `*.onnx`), иначе PyTorch CPU. Сигнатуры `embed_query`/`embed_passages` не менялись;
+  * `docker-compose.yml`: `build.args.WORKER_CUDA_VISIBLE_DEVICES`, env `EMBEDDING_MODEL_CACHE_DIR` для backend/worker, bind-volume `modelcache` на `${EMBEDDING_MODEL_CACHE_DIR}`;
+  * `.env.example`: `EMBEDDING_MODEL_CACHE_DIR="${PROJECT_DATA_DIR}/models"`, `WORKER_CUDA_VISIBLE_DEVICES=`.
+  * ⚠️ Не реализовано: `deploy.resources.reservations.devices` (проброс nvidia) — добавляется на GPU-сервере по месту, в базовом compose не включён (CPU-хост).
 
 
 ## Обнаруженные проблемы (ручное тестирование test-spec-modified.xlsx, 2026-10-13)
@@ -1264,3 +1274,10 @@ redis/worker в другую сеть и на другой каталог — о
   `docker compose down` — это и требование плана, и здравый смысл по ресурсам.
 - **Оценка:** 7.1–7.3 (конфиги) — ~1 день; 7.4–7.5 (unit-тесты) — 1–1.5 дня; 7.6
   (integration-тесты) — 1.5–2 дня. Итого ~4–5 дней.
+
+## Замечания по результатам тестирования (2026-10-15)
+
+1. **Итоги в КП (WeasyPrint):** в PDF-файле коммерческого предложения итоги (итоговая строка / сводная таблица) дублировались на каждой странице, а должны отображаться только на последней странице.
+    * **Причина:** WeasyPrint по умолчанию повторяет `tfoot` на каждой странице при рендеринге длинных таблиц.
+    * **Решение (реализовано):** итоговые строки (`Итого`, `НДС`, `Всего`) перенесены из `<tfoot>` в отдельный HTML-блок `<div class="totals">` после таблицы. Jinja2-контекст (`totals`, `vat_included`, `vat_rate`) остался без изменений — шаблон использует те же переменные.
+    * **Статус:** ✅ реализовано.

@@ -137,8 +137,11 @@ backend/
 │   └── versions/          # Файлы миграций: {YYYYMMDD}_{HHMMSS}-{rev}_{slug}.py
 ├── alembic.ini
 ├── pyproject.toml         # Зависимости проекта (uv)
+├── scripts/               # export_model.sh (ONNX/OpenVINO экспорт), entrypoint.sh (ENTRYPOINT)
 ├── uv.lock
 └── Dockerfile             # python:3.13-slim + системные либы WeasyPrint + лимиты потоков ML (ENV)
+                           #   ARG WORKER_CUDA_VISIBLE_DEVICES (пусто=CPU / непусто=CUDA torch cu124)
+                           #   IS_INTEL_CPU флаг в /app/.env_build; ENTRYPOINT=scripts/entrypoint.sh
 ```
 
 ### Ключевые модели (`app/models/models.py`)
@@ -162,7 +165,7 @@ backend/
 * `BACKEND_*` — debug, число воркеров, порт, `api_prefix` (по умолчанию `/api/v1`).
 * `CORS_ORIGINS` — список разрешённых origin (без префикса).
 * `JWT_*` — параметры JWT и auth-кук (секрет, сроки жизни, имена кук, secure).
-* `EMBEDDING_*` — локальная модель эмбеддингов (`EMBEDDING_MODEL_NAME`, `EMBEDDING_DEVICE`, `EMBEDDING_DIM`).
+* `EMBEDDING_*` — локальная модель эмбеддингов (`EMBEDDING_MODEL_NAME`, `EMBEDDING_DEVICE`, `EMBEDDING_DIM`, `EMBEDDING_MODEL_CACHE_DIR`). `EMBEDDING_MODEL_CACHE_DIR` — каталог экспортированной модели (ONNX/OpenVINO); пусто — выключено, модель загружается напрямую из HF-кэша. Заполняется скриптом `backend/scripts/export_model.sh` при старте контейнера.
 * `LLM_*` — LLM через litellm: `LLM_PROVIDER` (`openai` | `ollama`), имена моделей, `LLM_OLLAMA_BASE_URL`, параметры генерации.
 * `OPENAI_*` — API-ключ OpenAI (нужен только при `LLM_PROVIDER=openai`).
 * `OMP/MKL/OPENBLAS/NUMEXPR_NUM_THREADS` — ограничение потоков математических вычислений (CPU-режим ML, по умолчанию 4; также заданы в Dockerfile).
