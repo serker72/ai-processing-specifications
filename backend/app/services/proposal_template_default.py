@@ -30,7 +30,11 @@ DEFAULT_PROPOSAL_TEMPLATE = """<!DOCTYPE html>
   th, td { border: 1px solid #999; padding: 4px 6px; text-align: left; vertical-align: top; }
   th { background: #f0f0f0; }
   td.num, th.num { text-align: right; white-space: nowrap; }
-  tfoot td { font-weight: bold; }
+  .totals { margin-top: 8px; }
+  .totals table { width: auto; min-width: 300px; }
+  .totals td { border: none; padding: 2px 6px; }
+  .totals td:first-child { text-align: right; padding-right: 16px; }
+  .totals td:last-child { text-align: right; font-weight: bold; white-space: nowrap; }
   .signature { margin-top: 28px; }
 </style>
 </head>
@@ -81,28 +85,31 @@ DEFAULT_PROPOSAL_TEMPLATE = """<!DOCTYPE html>
       </tr>
       {% endfor %}
     </tbody>
-    <tfoot>
+  </table>
+
+  <div class="totals">
+    <table>
       <tr>
-        <td colspan="6">Итого</td>
-        <td class="num">{{ totals.total }}</td>
+        <td>Итого:</td>
+        <td>{{ totals.total }}</td>
       </tr>
       {% if vat_included %}
       <tr>
-        <td colspan="6">В том числе НДС {{ vat_rate }}%</td>
-        <td class="num">{{ totals.vat }}</td>
+        <td>В том числе НДС {{ vat_rate }}%:</td>
+        <td>{{ totals.vat }}</td>
       </tr>
       {% else %}
       <tr>
-        <td colspan="6">Без НДС</td>
-        <td class="num">{{ totals.total }}</td>
+        <td>Без НДС:</td>
+        <td>{{ totals.total }}</td>
       </tr>
       {% endif %}
       <tr>
-        <td colspan="6">Всего</td>
-        <td class="num">{{ totals.grand_total }}</td>
+        <td>Всего:</td>
+        <td>{{ totals.grand_total }}</td>
       </tr>
-    </tfoot>
-  </table>
+    </table>
+  </div>
 
   <div class="signature">
     <div>{{ seller.signer_position or "Руководитель" }} ____________________ {{ seller.signer_name or "" }}</div>
