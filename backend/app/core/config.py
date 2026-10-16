@@ -133,6 +133,9 @@ class EmbeddingSettings(BaseSettings):
     device: str = "cpu"
     # Размерность векторов модели (должна совпадать с Vector(n) в CatalogItem.embedding)
     dim: int = 768
+    # Каталог экспортированной модели (ONNX/OpenVINO). Пусто — выключено (PyTorch).
+    # Заполняется скриптом backend/scripts/export_model.sh при старте контейнера.
+    model_cache_dir: str = ""
 
 
 class LlmSettings(BaseSettings):

@@ -30,6 +30,14 @@ dependencies = [
     # Клиент для S3-совместимых хранилищ (MinIO)
     "aioboto3>=13.1",
     "aiobotocore>=2.19",
+    # Оптимизация эмбеддингов: ONNX / OpenVINO (для предэкспорта моделей)
+    "optimum[onnxruntime]>=1.20",
+]
+
+[project.optional-dependencies]
+intel = [
+    "optimum-intel>=1.18",
+    "openvino>=2024.0.0",
 ]
 
 [tool.uv.sources]
