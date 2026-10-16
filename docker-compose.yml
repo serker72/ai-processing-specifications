@@ -72,6 +72,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        WORKER_CUDA_VISIBLE_DEVICES: ${WORKER_CUDA_VISIBLE_DEVICES:-}
     image: ai-processing-specifications-backend:latest
     restart: unless-stopped
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 ${BACKEND_CONTAINER_COMMAND}
@@ -79,12 +81,14 @@ services:
       - .env
     environment:
       HF_HOME: ${HF_DATA_DIR}
+      EMBEDDING_MODEL_CACHE_DIR: ${EMBEDDING_MODEL_CACHE_DIR}
     extra_hosts:
       # Доступ к сервисам хоста (например, локальный Ollama) из контейнера
       - "host.docker.internal:host-gateway"
     volumes:
       - ./backend/app:/app/app
       - hfdata:${HF_DATA_DIR}
+      - modelcache:${EMBEDDING_MODEL_CACHE_DIR}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/health"]
       interval: 10s
@@ -107,12 +111,14 @@ services:
       - .env
     environment:
       HF_HOME: ${HF_DATA_DIR}
+      EMBEDDING_MODEL_CACHE_DIR: ${EMBEDDING_MODEL_CACHE_DIR}
     extra_hosts:
       # Доступ к сервисам хоста (например, локальный Ollama) из контейнера
       - "host.docker.internal:host-gateway"
     volumes:
       - ./backend/app:/app/app
       - hfdata:${HF_DATA_DIR}
+      - modelcache:${EMBEDDING_MODEL_CACHE_DIR}
     healthcheck:
       # У worker нет HTTP-сервера: живость проверяем пингом по брокеру
       test: ["CMD-SHELL", "celery -A app.worker inspect ping --timeout 10 >/dev/null 2>&1"]
@@ -177,3 +183,9 @@ volumes:
       o: bind
       type: none
       device: ${HF_DATA_DIR}
+  modelcache:
+    driver: local
+    driver_opts:
+      o: bind
+      type: none
+      device: ${EMBEDDING_MODEL_CACHE_DIR}
