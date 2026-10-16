@@ -1,0 +1,44 @@
+# GPU-override для запуска на сервере с NVIDIA.
+#
+# Базовый docker-compose.yml НЕ подключает этот файл: на CPU-хосте секция
+# deploy.resources.reservations.devices с driver: nvidia делает запуск
+# невозможным (Docker не найдёт драйвер). Поэтому проброс GPU — только здесь.
+#
+# Предусловия на хосте:
+#   * драйвер NVIDIA + nvidia-container-toolkit
+#     (nvidia-ctk runtime configure --runtime=docker && systemctl restart docker);
+#   * .env.gpu — копия .env с EMBEDDING_DEVICE=cuda и
+#     WORKER_CUDA_VISIBLE_DEVICES=<номер GPU, см. nvidia-smi>.
+#
+# Запуск (пересборка обязательна: CUDA-torch отличается от CPU-сборки):
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
+#     --env-file .env.gpu build backend
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
+#     --env-file .env.gpu up -d
+#
+# worker наследует образ от backend (image:), поэтому пересобирать его отдельно
+# не нужно — но GPU-бронь нужна и ему (эмбеддинги считаются в тасках Celery).
+
+services:
+  backend:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      # Страховка от запуска без .env.gpu: GPU-режим инференса (PyTorch, без ONNX/OpenVINO)
+      EMBEDDING_DEVICE: cuda
+
+  worker:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      EMBEDDING_DEVICE: cuda
